@@ -18,6 +18,7 @@ interface AppState {
   capture: CaptureRecord | null;
   contextItems: ContextItem[];
   settingsOpen: boolean;
+  historyOpen: boolean;
 
   setExpanded: (v: boolean) => void;
   setComposerValue: (v: string) => void;
@@ -32,6 +33,7 @@ interface AppState {
   toggleContextItem: (id: string) => void;
   removeContextItem: (id: string) => void;
   setSettingsOpen: (v: boolean) => void;
+  setHistoryOpen: (v: boolean) => void;
 }
 
 // Rough token estimate: ~4 chars per token for English text.
@@ -97,6 +99,7 @@ export const useAppStore = create<AppState>((set) => ({
   capture: null,
   contextItems: [],
   settingsOpen: false,
+  historyOpen: false,
 
   setExpanded: (v) => set({ expanded: v }),
   setComposerValue: (v) => set({ composerValue: v }),
@@ -121,4 +124,5 @@ export const useAppStore = create<AppState>((set) => ({
   removeContextItem: (id) =>
     set((s) => ({ contextItems: s.contextItems.filter((it) => it.id !== id) })),
   setSettingsOpen: (v) => set({ settingsOpen: v }),
+  setHistoryOpen: (v) => set({ historyOpen: v }),
 }));
