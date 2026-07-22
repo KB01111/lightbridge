@@ -1,0 +1,51 @@
+{
+  "name": "lightbridge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "LightBridge — Windows-only AI context overlay",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "test": "vitest run",
+    "test:e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/local-ci/e2e-smoke.ps1",
+    "validate": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/local-ci/validate.ps1",
+    "validate:ui": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/local-ci/validate-ui.ps1",
+    "validate:rust": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/local-ci/validate-rust.ps1",
+    "validate:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/local-ci/validate-windows.ps1",
+    "audit:local": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/local-ci/audit-local.ps1",
+    "profile:local": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/local-ci/profile-local.ps1",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "^0.1.7",
+    "@astryxdesign/theme-neutral": "^0.1.7",
+    "@heroicons/react": "^2.2.0",
+    "@tanstack/react-query": "^5.101.4",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-global-shortcut": "^2.3.2",
+    "@tauri-apps/plugin-notification": "^2.3.3",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@astryxdesign/cli": "^0.1.7",
+    "@eslint/js": "^10.0.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
+    "typescript": "^7.0.2",
+    "typescript-eslint": "^8.65.0",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
+  }
+}
