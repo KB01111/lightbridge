@@ -160,8 +160,10 @@ export function SettingsDialog() {
               isLabelHidden
             />
             {memoryQuery.trim().length > 1 &&
+              (!memoryQueryResult.isPending &&
+              !memoryQueryResult.isError &&
               (memoryQueryResult.data == null ||
-              memoryQueryResult.data.length === 0 ? (
+              memoryQueryResult.data.length === 0) ? (
                 <EmptyState
                   title="No matches"
                   description="Try a different search term."
@@ -169,7 +171,7 @@ export function SettingsDialog() {
                 />
               ) : (
                 <List density="compact" hasDividers>
-                  {memoryQueryResult.data.map((hit: MemoryHit) => (
+                  {memoryQueryResult.data?.map((hit: MemoryHit) => (
                     <ListItem
                       key={`${hit.kind}:${hit.refId}`}
                       label={hit.snippet}

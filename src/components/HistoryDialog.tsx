@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { Dialog, DialogHeader } from '@astryxdesign/core/Dialog';
@@ -7,6 +8,7 @@ import { Section } from '@astryxdesign/core/Section';
 import { Button } from '@astryxdesign/core/Button';
 import { Icon } from '@astryxdesign/core/Icon';
 import { Timestamp } from '@astryxdesign/core/Timestamp';
+import { Text } from '@astryxdesign/core/Text';
 import {
   ChatBubbleLeftRightIcon,
   PlusIcon,
@@ -26,6 +28,8 @@ export function HistoryDialog() {
   const setConversationId = useAppStore((s) => s.setConversationId);
   const setComposerValue = useAppStore((s) => s.setComposerValue);
   const setExpanded = useAppStore((s) => s.setExpanded);
+  const streamState = useAppStore((s) => s.streamState);
+  const [error, setError] = useState<string | null>(null);
 
   const conversationsQuery = useQuery({
     queryKey: ['conversations'],
@@ -34,24 +38,33 @@ export function HistoryDialog() {
   });
 
   const openConversation = (id: string) => {
+    if (streamState === 'streaming') return;
     setConversationId(id);
     setExpanded(true);
     setHistoryOpen(false);
   };
 
   const newConversation = () => {
+    if (streamState === 'streaming') return;
     setConversationId(null);
     setComposerValue('');
     setHistoryOpen(false);
   };
 
   const deleteConversation = async (id: string) => {
-    await ipc.deleteConversation(id);
-    if (conversationId === id) setConversationId(null);
-    await queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    if (streamState === 'streaming') return;
+    setError(null);
+    try {
+      await ipc.deleteConversation(id);
+      if (conversationId === id) setConversationId(null);
+      await queryClient.invalidateQueries({ queryKey: ['conversations'] });
+    } catch (err) {
+      setError(`Failed to delete conversation: ${String(err)}`);
+    }
   };
 
   const conversations = conversationsQuery.data ?? [];
+  const isStreaming = streamState === 'streaming';
 
   return (
     <Dialog isOpen={historyOpen} onOpenChange={setHistoryOpen} purpose="info" width={420}>
@@ -67,6 +80,7 @@ export function HistoryDialog() {
           size="sm"
           icon={<Icon icon={PlusIcon} size="sm" />}
           onClick={newConversation}
+          isDisabled={isStreaming}
         />
         {conversations.length === 0 ? (
           <EmptyState
@@ -85,6 +99,7 @@ export function HistoryDialog() {
                 description={<Timestamp value={c.updatedAt} format="auto" />}
                 startContent={<Icon icon={ChatBubbleLeftRightIcon} size="sm" />}
                 onClick={() => openConversation(c.id)}
+                isDisabled={isStreaming}
                 endContent={
                   <Button
                     label="Delete"
@@ -92,6 +107,7 @@ export function HistoryDialog() {
                     size="sm"
                     isIconOnly
                     icon={<Icon icon={TrashIcon} size="sm" />}
+                    isDisabled={isStreaming}
                     onClick={(e) => {
                       e.stopPropagation();
                       void deleteConversation(c.id);
@@ -101,6 +117,11 @@ export function HistoryDialog() {
               />
             ))}
           </List>
+        )}
+        {error != null && (
+          <Text type="supporting" color="secondary">
+            {error}
+          </Text>
         )}
       </Section>
     </Dialog>
