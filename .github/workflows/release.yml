@@ -1,0 +1,98 @@
+name: Signed Windows release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: pnpm install --frozen-lockfile
+
+      - name: Verify release identity and secrets
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $package = Get-Content package.json | ConvertFrom-Json
+          $tauri = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $cargoMatch = Select-String `
+            -Path src-tauri/Cargo.toml `
+            -Pattern '^version = "([^"]+)"' |
+            Select-Object -First 1
+          $cargoVersion = $cargoMatch.Matches[0].Groups[1].Value
+          if ("v$($package.version)" -ne "${{ github.ref_name }}") {
+            throw "Tag must equal package version: expected v$($package.version)"
+          }
+          if ($tauri.version -ne $package.version -or $cargoVersion -ne $package.version) {
+            throw "package.json, Cargo.toml, and tauri.conf.json versions must match."
+          }
+          if (-not $tauri.bundle.windows.wix.version) {
+            throw "A numeric MSI bundle.windows.wix.version is required."
+          }
+          if ($tauri.plugins.updater.pubkey.Contains("REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY")) {
+            throw "Provision the updater key and commit its public key before tagging."
+          }
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw "TAURI_SIGNING_PRIVATE_KEY is required."
+          }
+          if (-not $env:WINDOWS_CERTIFICATE_BASE64 -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            throw "Windows Authenticode certificate secrets are required."
+          }
+
+      - name: Import Authenticode certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP "lightbridge-signing.pfx"
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64)
+          )
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate `
+            -FilePath $certificatePath `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password $password
+          $configPath = "src-tauri/tauri.conf.json"
+          $tauriConfig = Get-Content $configPath -Raw | ConvertFrom-Json
+          $tauriConfig.bundle.windows.certificateThumbprint = $certificate.Thumbprint
+          $tauriConfig.bundle.windows.timestampUrl = "http://timestamp.digicert.com"
+          $tauriConfig | ConvertTo-Json -Depth 100 | Set-Content $configPath
+
+      - name: Build, sign, and publish NSIS/MSI plus updater metadata
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: LightBridge ${{ github.ref_name }}
+          releaseBody: |
+            Windows 11 x64 production candidate.
+            See docs/release.md for the native acceptance checklist.
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-rc.') }}
+          includeUpdaterJson: true
+          args: --bundles nsis,msi --config src-tauri/tauri.release.conf.json

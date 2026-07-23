@@ -21,6 +21,7 @@ Thumbs.db
 .eslintcache
 *.tsbuildinfo
 .vite/
+.codex-local/
 
 # Env / secrets
 .env

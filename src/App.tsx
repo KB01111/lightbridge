@@ -1,6 +1,7 @@
 import { useEffect, useMemo, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
+import { AppShell } from '@astryxdesign/core/AppShell';
 import { HStack, VStack, StackItem } from '@astryxdesign/core/Layout';
 import { Text } from '@astryxdesign/core/Text';
 import {
@@ -17,37 +18,45 @@ import { Markdown } from '@astryxdesign/core/Markdown';
 import { Token } from '@astryxdesign/core/Token';
 import { Button } from '@astryxdesign/core/Button';
 import { Icon } from '@astryxdesign/core/Icon';
+import { Selector } from '@astryxdesign/core/Selector';
 import { StatusDot } from '@astryxdesign/core/StatusDot';
 import { Thumbnail } from '@astryxdesign/core/Thumbnail';
 import { Toolbar } from '@astryxdesign/core/Toolbar';
+import { Banner } from '@astryxdesign/core';
 import { useStreamingText } from '@astryxdesign/core/hooks';
 import {
+  ArrowPathIcon,
   ChevronDownIcon,
   ChevronUpIcon,
   ClipboardDocumentIcon,
   ClockIcon,
   Cog6ToothIcon,
+  ShieldCheckIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 
-import { ipc, events, type ContextItem } from './lib/ipc';
+import {
+  ipc,
+  events,
+  type AiProfile,
+} from './lib/ipc';
 import {
   useAppStore,
   contextFromCapture,
   estimateTokens,
+  selectionsFromContext,
 } from './state/appStore';
 import { SettingsDialog } from './components/SettingsDialog';
 import { HistoryDialog } from './components/HistoryDialog';
+import { PrivacyDialog } from './components/PrivacyDialog';
 import { useEntryTransition } from './lib/useEntryTransition';
 
-const MODELS = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'];
+const PROFILE_OPTIONS = [
+  { value: 'best', label: 'Best · Sol' },
+  { value: 'balanced', label: 'Balanced · Terra' },
+  { value: 'fast', label: 'Fast · Luna' },
+];
 
-function contextBlock(item: ContextItem): string {
-  return `[context source="${item.sourceType}" name="${item.sourceName}" ref="${item.sourceRef}"]\n${item.content}\n[/context]`;
-}
-
-// Mount-animated wrappers: each remounts when its branch renders, so the
-// entry transition replays on every expand/collapse or drawer appearance.
 function ExpandedPanel({ children }: { children: ReactNode }) {
   const entry = useEntryTransition('slideUp');
   return (
@@ -77,21 +86,23 @@ function DrawerContent({ children }: { children: ReactNode }) {
 
 export default function App() {
   const queryClient = useQueryClient();
+  const store = useAppStore();
   const {
     expanded,
     composerValue,
     conversationId,
-    model,
+    profile,
     streamId,
     streamState,
     streamingText,
     streamError,
     capture,
     contextItems,
+    captureStatus,
     setExpanded,
     setComposerValue,
     setConversationId,
-    setModel,
+    setProfile,
     startStream,
     appendDelta,
     finishStream,
@@ -101,68 +112,122 @@ export default function App() {
     toggleContextItem,
     removeContextItem,
     setSettingsOpen,
-    setHistoryOpen,
-  } = useAppStore();
+    setLibraryOpen,
+    setPrivacyOpen,
+    setCaptureStatus,
+  } = store;
 
   const messagesQuery = useQuery({
     queryKey: ['messages', conversationId],
     queryFn: () => ipc.listMessages(conversationId!),
     enabled: conversationId != null,
   });
-
   const apiKeyQuery = useQuery({
     queryKey: ['hasApiKey'],
     queryFn: () => ipc.hasApiKey(),
   });
+  const settingsQuery = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => ipc.getSettings(),
+  });
 
-  // Wire backend events once.
+  const useCapture = (nextCapture: NonNullable<typeof capture>) => {
+    setCapture(nextCapture);
+    setContextItems(contextFromCapture(nextCapture));
+  };
+
+  const hydrateConversation = async (id: string) => {
+    const selections = await ipc.getConversationContext(id);
+    if (selections.length === 0) return;
+    const captures = await Promise.all(
+      [...new Set(selections.map((selection) => selection.captureId))].map(
+        (captureId) => ipc.getCapture(captureId),
+      ),
+    );
+    const selectedKeys = new Set(
+      selections.map(
+        (selection) => `${selection.captureId}:${selection.kind}`,
+      ),
+    );
+    const items = captures
+      .filter((item) => item != null)
+      .flatMap(contextFromCapture)
+      .filter((item) => selectedKeys.has(item.id));
+    const latest = captures.find((item) => item != null);
+    if (latest != null) setCapture(latest);
+    setContextItems(items);
+  };
+
   useEffect(() => {
     const unlisteners: Array<Promise<() => void>> = [
-      events.onCapture((c) => {
-        setCapture(c);
-        setContextItems(contextFromCapture(c));
-      }),
-      events.onOcrUpdated((c) => {
-        setCapture(c);
-        setContextItems(contextFromCapture(c));
-      }),
-      events.onChatDelta((d) => {
-        if (d.streamId === useAppStore.getState().streamId) {
-          appendDelta(d.delta);
+      events.onCapture(useCapture),
+      events.onOcrUpdated((updated) => {
+        if (useAppStore.getState().capture?.id === updated.id) {
+          useCapture(updated);
         }
       }),
-      events.onChatDone(() => {
-        finishStream();
-        void queryClient.invalidateQueries({ queryKey: ['messages'] });
+      events.onCaptureStatus(setCaptureStatus),
+      events.onChatDelta((delta) => {
+        if (delta.streamId === useAppStore.getState().streamId) {
+          appendDelta(delta.delta);
+        }
       }),
-      events.onChatError((e) => failStream(e.message)),
-      events.onOverlayShown(() => {
-        void ipc.captureForeground().then((c) => {
-          setCapture(c);
-          setContextItems(contextFromCapture(c));
-        }).catch(() => {
-          /* self-capture refused or no target — keep prior context */
+      events.onChatFinished((finished) => {
+        if (finished.streamId === useAppStore.getState().streamId) {
+          finishStream(finished.status, finished.error);
+        }
+        void queryClient.invalidateQueries({
+          queryKey: ['messages', finished.conversationId],
+        });
+        void queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      }),
+      events.onCaptureRequest(() => {
+        void ipc.captureForeground().catch((error) => {
+          setCaptureStatus({ phase: 'failed', message: String(error) });
         });
       }),
     ];
-    void ipc.getLastCapture().then((c) => {
-      if (c != null) {
-        setCapture(c);
-        setContextItems(contextFromCapture(c));
-      }
-    });
     return () => {
-      for (const p of unlisteners) void p.then((un) => un());
+      for (const listener of unlisteners) void listener.then((unlisten) => unlisten());
     };
+    // The event bridge is intentionally mounted once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Esc hides the overlay; Ctrl+E toggles expansion.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') void ipc.hideOverlay();
-      if (e.key === 'e' && e.ctrlKey) {
-        e.preventDefault();
+    const settings = settingsQuery.data;
+    if (settings == null) return;
+    setProfile(settings.aiProfile);
+    if (!settings.privacyAcknowledged) setPrivacyOpen(true);
+    if (
+      useAppStore.getState().conversationId == null &&
+      settings.lastActiveConversation != null
+    ) {
+      setConversationId(settings.lastActiveConversation);
+      void hydrateConversation(settings.lastActiveConversation);
+    } else if (
+      useAppStore.getState().conversationId == null &&
+      useAppStore.getState().capture == null
+    ) {
+      void ipc.getLastCapture().then((lastCapture) => {
+        if (lastCapture != null) useCapture(lastCapture);
+      });
+    }
+    // Hydrate once per backend settings revision.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsQuery.data]);
+
+  useEffect(() => {
+    if (conversationId != null) {
+      void ipc.setLastActiveConversation(conversationId);
+    }
+  }, [conversationId]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') void ipc.hideOverlay();
+      if (event.key === 'e' && event.ctrlKey) {
+        event.preventDefault();
         setExpanded(!useAppStore.getState().expanded);
       }
     };
@@ -171,61 +236,67 @@ export default function App() {
   }, [setExpanded]);
 
   const includedItems = useMemo(
-    () => contextItems.filter((it) => it.included),
+    () => contextItems.filter((item) => item.included),
     [contextItems],
   );
   const totalTokens = useMemo(
     () =>
-      includedItems.reduce((sum, it) => sum + it.tokenEstimate, 0) +
+      includedItems.reduce((total, item) => total + item.tokenEstimate, 0) +
       estimateTokens(composerValue),
     [includedItems, composerValue],
+  );
+  const hasSensitiveContext = includedItems.some(
+    (item) => item.privacy === 'sensitive',
   );
 
   const submit = async (value: string) => {
     const text = value.trim();
     if (text.length === 0 || streamState === 'streaming') return;
+    if (settingsQuery.data?.privacyAcknowledged !== true) {
+      setPrivacyOpen(true);
+      return;
+    }
     if (apiKeyQuery.data !== true) {
       setSettingsOpen(true);
       return;
     }
-    let convId = conversationId;
-    if (convId == null) {
-      const conv = await ipc.createConversation(text.slice(0, 60));
-      convId = conv.id;
-      setConversationId(convId);
+    try {
+      let activeConversation = conversationId;
+      if (activeConversation == null) {
+        const conversation = await ipc.createConversation(text.slice(0, 60));
+        activeConversation = conversation.id;
+        setConversationId(activeConversation);
+      }
+      setComposerValue('');
+      setExpanded(true);
+      const nextStreamId = await ipc.startChat({
+        conversationId: activeConversation,
+        userMessage: text,
+        contextSelections: selectionsFromContext(contextItems),
+        profile,
+      });
+      startStream(nextStreamId);
+      await queryClient.invalidateQueries({
+        queryKey: ['messages', activeConversation],
+      });
+    } catch (error) {
+      failStream(String(error));
     }
-    setComposerValue('');
-    setExpanded(true);
-    const id = await ipc.startChat({
-      conversationId: convId,
-      userMessage: text,
-      contextBlocks: includedItems
-        .filter((it) => it.content.length > 0)
-        .map(contextBlock),
-      model,
-    });
-    startStream(id);
-    void queryClient.invalidateQueries({ queryKey: ['messages', convId] });
-  };
-
-  const stop = () => {
-    if (streamId != null) void ipc.cancelChat(streamId);
   };
 
   const displayedStreamingText = useStreamingText(
     streamingText,
     streamState === 'streaming',
   );
-
   const ocrStatus = capture?.ocrStatus;
   const ocrDot =
-    ocrStatus === 'done'
-      ? { variant: 'success' as const, label: 'OCR complete' }
-      : ocrStatus === 'pending'
-        ? { variant: 'accent' as const, label: 'OCR running' }
-        : ocrStatus === 'failed'
-          ? { variant: 'error' as const, label: 'OCR failed' }
-          : { variant: 'neutral' as const, label: 'No capture' };
+    captureStatus.phase === 'failed' || ocrStatus === 'failed'
+      ? { variant: 'error' as const, label: 'Capture needs attention' }
+      : captureStatus.phase === 'capturing' || captureStatus.phase === 'ocr'
+        ? { variant: 'accent' as const, label: captureStatus.message }
+        : ocrStatus === 'done'
+          ? { variant: 'success' as const, label: 'Capture ready' }
+          : { variant: 'neutral' as const, label: 'No active capture' };
 
   const drawer =
     contextItems.length > 0 ? (
@@ -248,21 +319,30 @@ export default function App() {
               onRemove={() => removeContextItem(item.id)}
             />
           ))}
+          {hasSensitiveContext && (
+            <Token
+              label="Sensitive · sent only on Send"
+              color="orange"
+              icon={<Icon icon={ShieldCheckIcon} size="sm" />}
+            />
+          )}
         </DrawerContent>
       </ChatComposerDrawer>
     ) : undefined;
 
   const composer = (
     <ChatComposer
-      onSubmit={(v) => void submit(v)}
-      onStop={stop}
+      onSubmit={(value) => void submit(value)}
+      onStop={() => {
+        if (streamId != null) void ipc.cancelChat(streamId);
+      }}
       isStopShown={streamState === 'streaming'}
       value={composerValue}
       onChange={setComposerValue}
       placeholder={
         capture != null
-          ? `Ask about ${capture.window.appName}...`
-          : 'Ask LightBridge...'
+          ? `Ask about ${capture.window.appName}…`
+          : 'Ask LightBridge…'
       }
       density="compact"
       drawer={drawer}
@@ -272,17 +352,20 @@ export default function App() {
         </Text>
       }
       footerActions={
-        <HStack gap={1} vAlign="center">
-          {MODELS.map((m) => (
-            <Button
-              key={m}
-              label={m}
-              size="sm"
-              variant={m === model ? 'secondary' : 'ghost'}
-              onClick={() => setModel(m)}
-            />
-          ))}
-        </HStack>
+        <Selector
+          label="Answer quality"
+          isLabelHidden
+          size="sm"
+          value={profile}
+          options={PROFILE_OPTIONS}
+          onChange={(value) => {
+            const next = value as AiProfile;
+            setProfile(next);
+            void ipc.setAiProfile(next).then(() => {
+              void queryClient.invalidateQueries({ queryKey: ['settings'] });
+            });
+          }}
+        />
       }
       status={
         streamState === 'error' && streamError != null
@@ -293,153 +376,240 @@ export default function App() {
   );
 
   return (
-    <VStack style={{ height: '100dvh', width: '100%' }}>
-      <Toolbar
-        label="LightBridge"
-        dividers={expanded ? ['bottom'] : []}
-        startContent={
-          <HStack gap={2} vAlign="center">
-            <StatusDot
-              variant={ocrDot.variant}
-              label={ocrDot.label}
-              tooltip={ocrDot.label}
-              isPulsing={ocrStatus === 'pending'}
-            />
-            <VStack gap={0}>
-              <Text type="label" weight="semibold">
-                {capture?.window.appName ?? 'LightBridge'}
-              </Text>
-              <Text type="supporting" color="secondary">
-                {capture?.window.title ?? 'Press Ctrl+Shift+Space over any window'}
-              </Text>
-            </VStack>
-          </HStack>
-        }
-        endContent={
-          <HStack gap={1} vAlign="center">
-            <Button
-              label="History"
-              variant="ghost"
-              size="sm"
-              icon={<Icon icon={ClockIcon} size="sm" />}
-              isIconOnly
-              onClick={() => setHistoryOpen(true)}
-            />
-            <Button
-              label="Settings"
-              variant="ghost"
-              size="sm"
-              icon={<Icon icon={Cog6ToothIcon} size="sm" />}
-              isIconOnly
-              onClick={() => setSettingsOpen(true)}
-            />
-            <Button
-              label={expanded ? 'Collapse' : 'Expand'}
-              variant="ghost"
-              size="sm"
-              icon={
-                <Icon
-                  icon={expanded ? ChevronUpIcon : ChevronDownIcon}
-                  size="sm"
-                />
-              }
-              isIconOnly
-              onClick={() => setExpanded(!expanded)}
-            />
-            <Button
-              label="Hide"
-              variant="ghost"
-              size="sm"
-              icon={<Icon icon={XMarkIcon} size="sm" />}
-              isIconOnly
-              onClick={() => void ipc.hideOverlay()}
-            />
-          </HStack>
-        }
-      />
-
-      {expanded ? (
-        <ExpandedPanel>
-          <ChatLayout density="compact" style={{ height: '100%' }} composer={composer}>
-            <ChatMessageList
-              density="compact"
-              isStreaming={streamState === 'streaming'}
-              emptyState={
-                <Text type="supporting" color="secondary">
-                  Ask a question about the captured window, or anything else.
+    <AppShell height="fill" variant="surface" contentPadding={0}>
+      <VStack style={{ height: '100%', width: '100%' }}>
+        <Toolbar
+          label="LightBridge"
+          dividers={expanded ? ['bottom'] : []}
+          startContent={
+            <HStack gap={2} vAlign="center">
+              <StatusDot
+                variant={ocrDot.variant}
+                label={ocrDot.label}
+                tooltip={ocrDot.label}
+                isPulsing={
+                  captureStatus.phase === 'capturing' ||
+                  captureStatus.phase === 'ocr'
+                }
+              />
+              <VStack gap={0}>
+                <Text type="label" weight="semibold">
+                  {capture?.window.appName ?? 'LightBridge'}
                 </Text>
-              }>
-              {(messagesQuery.data ?? [])
-                .filter((m) => m.role !== 'system')
-                .map((m) => (
-                  <ChatMessage
-                    key={m.id}
-                    sender={m.role === 'user' ? 'user' : 'assistant'}>
-                    <ChatMessageBubble
-                      variant={m.role === 'user' ? 'filled' : 'ghost'}
-                      metadata={
-                        m.role === 'assistant' ? (
-                          <ChatMessageMetadata
-                            timestamp={
-                              <Timestamp value={m.createdAt} format="time" />
-                            }
-                            footer={
-                              <HStack gap={1} vAlign="center">
-                                <Button
-                                  label="Copy"
-                                  variant="ghost"
-                                  size="sm"
-                                  icon={
-                                    <Icon
-                                      icon={ClipboardDocumentIcon}
-                                      size="sm"
-                                    />
-                                  }
-                                  isIconOnly
-                                  onClick={() =>
-                                    void navigator.clipboard.writeText(
-                                      m.content,
-                                    )
-                                  }
-                                />
-                                <Text type="supporting" color="secondary">
-                                  {model}
-                                </Text>
-                              </HStack>
-                            }
-                          />
-                        ) : undefined
+                <Text type="supporting" color="secondary">
+                  {capture?.window.title ??
+                    `Press ${settingsQuery.data?.shortcut ?? 'Ctrl+Shift+Space'} over any window`}
+                </Text>
+              </VStack>
+            </HStack>
+          }
+          endContent={
+            <HStack gap={1} vAlign="center">
+              <Button
+                label="Recapture"
+                variant="ghost"
+                size="sm"
+                icon={<Icon icon={ArrowPathIcon} size="sm" />}
+                isIconOnly
+                isDisabled={
+                  captureStatus.phase === 'capturing' ||
+                  captureStatus.phase === 'ocr'
+                }
+                onClick={() =>
+                  void ipc.recapture().catch((error) => {
+                    setCaptureStatus({ phase: 'failed', message: String(error) });
+                  })
+                }
+              />
+              <Button
+                label="History and captures"
+                variant="ghost"
+                size="sm"
+                icon={<Icon icon={ClockIcon} size="sm" />}
+                isIconOnly
+                onClick={() => setLibraryOpen(true)}
+              />
+              <Button
+                label="Settings"
+                variant="ghost"
+                size="sm"
+                icon={<Icon icon={Cog6ToothIcon} size="sm" />}
+                isIconOnly
+                onClick={() => setSettingsOpen(true)}
+              />
+              <Button
+                label={expanded ? 'Collapse' : 'Expand'}
+                variant="ghost"
+                size="sm"
+                icon={
+                  <Icon
+                    icon={expanded ? ChevronUpIcon : ChevronDownIcon}
+                    size="sm"
+                  />
+                }
+                isIconOnly
+                onClick={() => setExpanded(!expanded)}
+              />
+              <Button
+                label="Hide"
+                variant="ghost"
+                size="sm"
+                icon={<Icon icon={XMarkIcon} size="sm" />}
+                isIconOnly
+                onClick={() => void ipc.hideOverlay()}
+              />
+            </HStack>
+          }
+        />
+
+        {captureStatus.phase === 'failed' && (
+          <Banner
+            status="error"
+            container="section"
+            title="Capture failed"
+            description={captureStatus.message}
+            endContent={
+              <Button
+                label="Try again"
+                variant="secondary"
+                size="sm"
+                onClick={() => void ipc.recapture()}
+              />
+            }
+          />
+        )}
+
+        {expanded ? (
+          <ExpandedPanel>
+            <ChatLayout
+              density="compact"
+              style={{ height: '100%' }}
+              composer={composer}>
+              <ChatMessageList
+                density="compact"
+                isStreaming={streamState === 'streaming'}
+                emptyState={
+                  messagesQuery.isPending ? (
+                    <Text type="supporting" color="secondary">
+                      Loading conversation…
+                    </Text>
+                  ) : messagesQuery.isError ? (
+                    <Text type="supporting" color="secondary">
+                      Could not load this conversation.
+                    </Text>
+                  ) : (
+                    <Text type="supporting" color="secondary">
+                      Capture a window, choose context, and ask a question.
+                    </Text>
+                  )
+                }>
+                {(messagesQuery.data ?? [])
+                  .filter(
+                    (message) =>
+                      message.role !== 'system' &&
+                      message.status !== 'streaming',
+                  )
+                  .map((message) => (
+                    <ChatMessage
+                      key={message.id}
+                      sender={
+                        message.role === 'user' ? 'user' : 'assistant'
                       }>
-                      {m.role === 'assistant' ? (
-                        <Markdown density="compact">{m.content}</Markdown>
+                      <ChatMessageBubble
+                        variant={
+                          message.role === 'user' ? 'filled' : 'ghost'
+                        }
+                        metadata={
+                          message.role === 'assistant' ? (
+                            <ChatMessageMetadata
+                              timestamp={
+                                <Timestamp
+                                  value={message.createdAt}
+                                  format="time"
+                                />
+                              }
+                              footer={
+                                <HStack gap={1} vAlign="center">
+                                  <StatusDot
+                                    variant={
+                                      message.status === 'completed'
+                                        ? 'success'
+                                        : message.status === 'cancelled'
+                                          ? 'neutral'
+                                          : 'error'
+                                    }
+                                    label={message.status}
+                                    tooltip={
+                                      message.error ?? message.status
+                                    }
+                                  />
+                                  <Button
+                                    label="Copy"
+                                    variant="ghost"
+                                    size="sm"
+                                    icon={
+                                      <Icon
+                                        icon={ClipboardDocumentIcon}
+                                        size="sm"
+                                      />
+                                    }
+                                    isIconOnly
+                                    onClick={() =>
+                                      void navigator.clipboard.writeText(
+                                        message.content,
+                                      )
+                                    }
+                                  />
+                                  <Text type="supporting" color="secondary">
+                                    {message.model ?? 'Unknown model'}
+                                  </Text>
+                                </HStack>
+                              }
+                            />
+                          ) : undefined
+                        }>
+                        {message.role === 'assistant' ? (
+                          message.content.length > 0 ? (
+                            <Markdown density="compact">
+                              {message.content}
+                            </Markdown>
+                          ) : (
+                            <Text type="supporting" color="secondary">
+                              No response text was saved.
+                            </Text>
+                          )
+                        ) : (
+                          message.content
+                        )}
+                      </ChatMessageBubble>
+                    </ChatMessage>
+                  ))}
+                {streamState === 'streaming' && (
+                  <ChatMessage sender="assistant">
+                    <ChatMessageBubble variant="ghost">
+                      {displayedStreamingText.length > 0 ? (
+                        <Markdown density="compact">
+                          {displayedStreamingText}
+                        </Markdown>
                       ) : (
-                        m.content
+                        <Text type="supporting" color="secondary">
+                          Thinking…
+                        </Text>
                       )}
                     </ChatMessageBubble>
                   </ChatMessage>
-                ))}
-              {streamState === 'streaming' && (
-                <ChatMessage sender="assistant">
-                  <ChatMessageBubble variant="ghost">
-                    {displayedStreamingText.length > 0 ? (
-                      <Markdown density="compact">{displayedStreamingText}</Markdown>
-                    ) : (
-                      <Text type="supporting" color="secondary">
-                        Thinking…
-                      </Text>
-                    )}
-                  </ChatMessageBubble>
-                </ChatMessage>
-              )}
-            </ChatMessageList>
-          </ChatLayout>
-        </ExpandedPanel>
-      ) : (
-        <CollapsedComposer>{composer}</CollapsedComposer>
-      )}
+                )}
+              </ChatMessageList>
+            </ChatLayout>
+          </ExpandedPanel>
+        ) : (
+          <CollapsedComposer>{composer}</CollapsedComposer>
+        )}
 
-      <SettingsDialog />
-      <HistoryDialog />
-    </VStack>
+        <SettingsDialog />
+        <HistoryDialog />
+        <PrivacyDialog />
+      </VStack>
+    </AppShell>
   );
 }

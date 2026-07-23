@@ -9,17 +9,19 @@ use crate::db::Db;
 pub struct AppState {
     pub db: Arc<Db>,
     /// Active chat stream cancellation: stream_id -> sender(false to cancel)
-    pub streams: Mutex<HashMap<String, watch::Sender<bool>>>,
+    pub streams: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     /// HWND captured just before overlay focus (set by shortcut path).
-    pub pending_target_hwnd: Mutex<Option<u64>>,
+    pub pending_target_hwnd: Arc<Mutex<Option<u64>>>,
+    pub active_shortcut: Arc<Mutex<String>>,
 }
 
 impl AppState {
-    pub fn new(db: Db) -> Self {
+    pub fn new(db: Db, shortcut: String) -> Self {
         Self {
             db: Arc::new(db),
-            streams: Mutex::new(HashMap::new()),
-            pending_target_hwnd: Mutex::new(None),
+            streams: Arc::new(Mutex::new(HashMap::new())),
+            pending_target_hwnd: Arc::new(Mutex::new(None)),
+            active_shortcut: Arc::new(Mutex::new(shortcut)),
         }
     }
 }

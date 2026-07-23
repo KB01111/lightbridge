@@ -1,38 +1,52 @@
-# LightBridge — honest limitations (current tree)
+# LightBridge release boundaries
 
-This repository implements a **working vertical slice** of LightBridge on Windows:
+The current tree is a production-candidate Windows MVP:
 
-- Tauri 2 host with tray + `Ctrl+Shift+Space`
-- Foreground HWND resolve before overlay focus
-- Window capture (`xcap`) with self-capture refusal
-- Windows.Media.Ocr pipeline (background)
-- SQLite (WAL, FTS5) for conversations, messages, captures, memory search
-- OpenAI Chat Completions streaming from Rust (API key in Windows Credential Manager)
-- Astryx dark-first overlay UI with removable context tokens
+- Exact-HWND window capture with local PNG retention and bounded JPEG upload
+- On-device Windows OCR, capture progress, recapture, and actionable failures
+- OpenAI Responses API multimodal streaming from Rust with cancellation,
+  checkpoint recovery, timeouts, retries, and provider-safe errors
+- Best, Balanced, and Fast server-validated model profiles
+- SQLite WAL/FTS5 persistence for chats, messages, captures, context, and settings
+- Unified chat/capture/search library with restart hydration and confirmed deletion
+- First-run privacy disclosure, sensitive-context indicators, diagnostics export,
+  configurable shortcut, retention settings, and updater UI
+- NSIS/MSI configuration, pull-request CI, native WebDriver coverage, and a
+  tag-driven signed release workflow
 
-It does **not** yet claim full parity with the original multi-week product brief.
+## Deliberately deferred beyond v1
 
-## Not implemented yet (do not treat as done)
+1. ChatKit and AgentOS/host actions
+2. Document ingestion, embeddings, and vector retrieval
+3. Cloud sync
+4. Windows Graphics Capture fallback for protected content
 
-1. **OpenAI ChatKit React + official ChatKit server sidecar** — deferred; Astryx chat surface + host streaming used instead.
-2. **AgentOS sandboxed sessions, bindings, resource limits, action-review** — deferred (no fake agent success paths).
-3. **Document ingestion** for PDF/DOCX/XLSX/PPTX + folder watching + embeddings/vector retrieval — not shipped.
-4. **Full Windows Graphics Capture** path for protected/hardware-accelerated edge cases — xcap first.
-5. **Configurable global shortcut UI**, rich notifications, crash/stream recovery polish — partial.
-6. **Production installer signing**, real multi-size `.ico`/`.icns` branding assets — placeholders.
-7. **End-to-end automated UI tests** driving the live overlay — smoke scripts cover typecheck/unit/rust tests.
+## External release gates
+
+The repository does not contain signing secrets. A public `1.0.0` release still
+requires:
+
+1. Replacing the updater public-key placeholder with the generated public key
+2. Adding the updater private key to GitHub Actions secrets
+3. Provisioning an Authenticode certificate and its CI secrets
+4. Completing the interactive Windows 11 installer/update/uninstall checklist in
+   `docs/release.md`
+
+The workflow intentionally refuses to publish while these requirements are
+missing.
 
 ## Runtime requirements
 
-- Windows 11 recommended
+- Windows 11 x64
 - WebView2
-- Optional: OpenAI API key via Settings (stored in Credential Manager)
-- OCR languages installed in Windows language pack for `Windows.Media.Ocr`
+- OpenAI API key stored through Settings in Windows Credential Manager
+- Installed Windows OCR language for the content being captured
 
-## Security posture (current)
+## Security posture
 
-- Narrow Tauri commands (no arbitrary FS/HTTP/shell from the webview)
-- CSP restricts connect-src to self, loopback, and `api.openai.com`
-- Provider key never returned to React
-- Captured OCR/context treated as untrusted in the system prompt
-- Agent-side host mutation path intentionally absent until action-review lands
+- The webview has no arbitrary filesystem, shell, provider HTTP, or global
+  shortcut permissions
+- Provider credentials never enter React and captured content is not logged
+- Screenshot paths and source validation remain inside Rust
+- Provider requests use `store: false`
+- Diagnostics exclude credentials and captured content by default
