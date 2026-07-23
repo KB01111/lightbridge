@@ -46,6 +46,9 @@ pub struct ChatMessageRecord {
     pub conversation_id: String,
     pub role: String,
     pub content: String,
+    pub model: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -54,6 +57,8 @@ pub struct ChatMessageRecord {
 pub struct MemoryHit {
     pub kind: String,
     pub ref_id: String,
+    pub owner_id: String,
+    pub source_title: String,
     pub snippet: String,
     pub created_at: DateTime<Utc>,
 }
@@ -67,23 +72,80 @@ pub struct ChatDelta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChatDone {
+pub struct ChatFinished {
     pub stream_id: String,
+    pub conversation_id: String,
     pub message_id: String,
+    pub status: String,
+    pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ChatError {
-    pub stream_id: String,
-    pub message: String,
+pub struct ContextSelection {
+    pub capture_id: String,
+    pub kind: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartChatArgs {
+    pub stream_id: String,
     pub conversation_id: String,
     pub user_message: String,
-    pub context_blocks: Vec<String>,
-    pub model: String,
+    pub context_selections: Vec<ContextSelection>,
+    pub profile: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub shortcut: String,
+    pub ai_profile: String,
+    pub capture_retention_days: u32,
+    pub privacy_acknowledged: bool,
+    pub last_active_conversation: Option<String>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            shortcut: "Ctrl+Shift+Space".into(),
+            ai_profile: "best".into(),
+            capture_retention_days: 30,
+            privacy_acknowledged: false,
+            last_active_conversation: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AiProfile {
+    pub model: &'static str,
+    pub reasoning_effort: &'static str,
+}
+
+pub fn resolve_profile(id: &str) -> Option<AiProfile> {
+    match id {
+        "best" => Some(AiProfile {
+            model: "gpt-5.6-sol",
+            reasoning_effort: "high",
+        }),
+        "balanced" => Some(AiProfile {
+            model: "gpt-5.6-terra",
+            reasoning_effort: "medium",
+        }),
+        "fast" => Some(AiProfile {
+            model: "gpt-5.6-luna",
+            reasoning_effort: "low",
+        }),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureStatus {
+    pub phase: String,
+    pub message: String,
 }

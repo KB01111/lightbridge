@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::Utc;
+use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageFormat};
 use sha2::{Digest, Sha256};
@@ -16,30 +17,43 @@ const SELF_PROCESS_MARKERS: &[&str] = &["lightbridge", "LightBridge"];
 
 #[cfg(windows)]
 pub fn resolve_foreground_window(exclude_hwnd: Option<u64>) -> Result<WindowInfo> {
-    use windows::Win32::Foundation::{HMODULE, MAX_PATH, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        bail!("No foreground window is available.");
+    }
+    resolve_window(hwnd.0 as u64, exclude_hwnd)
+}
+
+#[cfg(windows)]
+pub fn resolve_window(hwnd_value: u64, exclude_hwnd: Option<u64>) -> Result<WindowInfo> {
+    use windows::Win32::Foundation::{HMODULE, HWND, MAX_PATH, RECT};
     use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+        GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
     };
 
     unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            bail!("no foreground window");
+        let hwnd = HWND(hwnd_value as *mut _);
+        if !IsWindow(hwnd).as_bool() {
+            bail!("The captured window is no longer available. Focus it and recapture.");
         }
         if let Some(ex) = exclude_hwnd {
-            if hwnd.0 as u64 == ex {
-                // Caller should have captured before focus; still refuse self.
-                bail!("foreground window is LightBridge; refusing self-capture");
+            if hwnd_value == ex {
+                bail!("LightBridge cannot capture itself. Focus another window and recapture.");
             }
+        }
+        if IsIconic(hwnd).as_bool() {
+            bail!("The captured window is minimized. Restore it and recapture.");
         }
 
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if pid == 0 {
-            bail!("failed to resolve process id");
+            bail!("The captured window process is unavailable. Recapture another window.");
         }
 
         let mut title_buf = [0u16; 512];
@@ -71,7 +85,7 @@ pub fn resolve_foreground_window(exclude_hwnd: Option<u64>) -> Result<WindowInfo
             .unwrap_or_else(|| "Unknown".into());
 
         let info = WindowInfo {
-            hwnd: hwnd.0 as u64,
+            hwnd: hwnd_value,
             process_id: pid,
             process_path,
             app_name,
@@ -85,7 +99,7 @@ pub fn resolve_foreground_window(exclude_hwnd: Option<u64>) -> Result<WindowInfo
         };
 
         if is_self_window(&info) {
-            bail!("refusing to capture LightBridge itself");
+            bail!("LightBridge cannot capture itself. Focus another window and recapture.");
         }
         Ok(info)
     }
@@ -93,6 +107,11 @@ pub fn resolve_foreground_window(exclude_hwnd: Option<u64>) -> Result<WindowInfo
 
 #[cfg(not(windows))]
 pub fn resolve_foreground_window(_exclude_hwnd: Option<u64>) -> Result<WindowInfo> {
+    bail!("window capture is only supported on Windows");
+}
+
+#[cfg(not(windows))]
+pub fn resolve_window(_hwnd: u64, _exclude_hwnd: Option<u64>) -> Result<WindowInfo> {
     bail!("window capture is only supported on Windows");
 }
 
@@ -115,19 +134,21 @@ pub fn capture_window_image(info: &WindowInfo) -> Result<DynamicImage> {
         let windows = Window::all().map_err(|e| anyhow!("enumerate windows: {e}"))?;
         let target = windows
             .into_iter()
-            .find(|w| {
-                w.id() as u64 == info.hwnd
-                    || (w.title() == info.title && w.app_name() == info.app_name)
-            })
-            .ok_or_else(|| anyhow!("target window not found for capture"))?;
+            .find(|w| w.id() as u64 == info.hwnd)
+            .ok_or_else(|| {
+                anyhow!("The captured window is no longer available. Focus it and recapture.")
+            })?;
 
         if target.title().contains(SELF_TITLE) {
             bail!("refusing to capture LightBridge window via xcap");
         }
 
-        let img = target
-            .capture_image()
-            .map_err(|e| anyhow!("capture_image: {e}"))?;
+        let img = target.capture_image().map_err(|_| {
+            anyhow!(
+                "Windows blocked this capture or the window stopped responding. \
+                     Protected video and secure surfaces cannot be captured."
+            )
+        })?;
         // xcap returns RgbaImage
         Ok(DynamicImage::ImageRgba8(img))
     }
@@ -178,4 +199,43 @@ fn make_preview_jpeg_base64(image: &DynamicImage) -> Result<String> {
         .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Jpeg)
         .context("encode preview jpeg")?;
     Ok(format!("data:image/jpeg;base64,{}", B64.encode(bytes)))
+}
+
+pub fn make_api_image_base64(path: &Path) -> Result<String> {
+    let image = image::open(path).context("open selected capture")?;
+    let bounded = image.resize(2048, 2048, FilterType::Lanczos3);
+    let rgb = bounded.to_rgb8();
+    let mut bytes = Vec::new();
+    JpegEncoder::new_with_quality(&mut bytes, 88)
+        .encode_image(&rgb)
+        .context("encode selected capture")?;
+    Ok(format!("data:image/jpeg;base64,{}", B64.encode(bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_image_is_jpeg_and_bounded_to_2048_pixels() {
+        let dir = std::env::temp_dir().join(format!("lb-image-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fixture.png");
+        DynamicImage::new_rgb8(3000, 1000).save(&path).unwrap();
+        let encoded = make_api_image_base64(&path).unwrap();
+        let bytes = B64
+            .decode(encoded.strip_prefix("data:image/jpeg;base64,").unwrap())
+            .unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!(decoded.width(), 2048);
+        assert!(decoded.height() <= 2048);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exact_hwnd_resolution_rejects_destroyed_window() {
+        let error = resolve_window(u64::MAX, None).unwrap_err().to_string();
+        assert!(error.contains("no longer available"));
+    }
 }

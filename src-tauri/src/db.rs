@@ -6,11 +6,26 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use crate::models::{CaptureRecord, ChatMessageRecord, ConversationRecord, MemoryHit, WindowInfo};
+use crate::models::{
+    AppSettings, CaptureRecord, ChatMessageRecord, ContextSelection, ConversationRecord, MemoryHit,
+    WindowInfo,
+};
 
 pub struct Db {
     conn: Mutex<Connection>,
     data_dir: PathBuf,
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 impl Db {
@@ -45,7 +60,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -113,6 +128,64 @@ impl Db {
                 params![Utc::now().to_rfc3339()],
             )?;
         }
+        if applied.unwrap_or(0) < 2 {
+            let transaction = conn.transaction()?;
+            if !column_exists(&transaction, "messages", "model")? {
+                transaction.execute("ALTER TABLE messages ADD COLUMN model TEXT", [])?;
+            }
+            if !column_exists(&transaction, "messages", "status")? {
+                transaction.execute(
+                    "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
+                    [],
+                )?;
+            }
+            if !column_exists(&transaction, "messages", "error")? {
+                transaction.execute("ALTER TABLE messages ADD COLUMN error TEXT", [])?;
+            }
+            transaction.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS conversation_context (
+                  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                  capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+                  kind TEXT NOT NULL CHECK(kind IN ('window', 'screenshot', 'ocr')),
+                  selected_at TEXT NOT NULL,
+                  PRIMARY KEY (conversation_id, capture_id, kind)
+                );
+
+                CREATE TABLE IF NOT EXISTS app_settings (
+                  key TEXT PRIMARY KEY NOT NULL,
+                  value TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                "#,
+            )?;
+            let now = Utc::now().to_rfc3339();
+            for (key, value) in [
+                ("shortcut", "Ctrl+Shift+Space"),
+                ("ai_profile", "best"),
+                ("capture_retention_days", "30"),
+                ("privacy_acknowledged", "false"),
+            ] {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)",
+                    params![key, value, now],
+                )?;
+            }
+            transaction.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
+        Ok(())
+    }
+
+    pub fn reset_interrupted_streams(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE messages SET status = 'failed', error = 'Interrupted by app restart' WHERE status = 'streaming'",
+            [],
+        )?;
         Ok(())
     }
 
@@ -293,6 +366,11 @@ impl Db {
             params![id],
         )?;
         conn.execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+        conn.execute(
+            "UPDATE app_settings SET value = '', updated_at = ?1
+             WHERE key = 'last_active_conversation' AND value = ?2",
+            params![Utc::now().to_rfc3339(), id],
+        )?;
         Ok(())
     }
 
@@ -302,22 +380,40 @@ impl Db {
         role: &str,
         content: &str,
     ) -> Result<ChatMessageRecord> {
+        self.insert_message_with_state(conversation_id, role, content, None, "completed", None)
+    }
+
+    pub fn insert_message_with_state(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        model: Option<&str>,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<ChatMessageRecord> {
         let rec = ChatMessageRecord {
             id: Uuid::new_v4().to_string(),
             conversation_id: conversation_id.to_string(),
             role: role.to_string(),
             content: content.to_string(),
+            model: model.map(str::to_string),
+            status: status.to_string(),
+            error: error.map(str::to_string),
             created_at: Utc::now(),
         };
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO messages(id, conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO messages(id, conversation_id, role, content, model, status, error, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 rec.id,
                 rec.conversation_id,
                 rec.role,
                 rec.content,
-                rec.created_at.to_rfc3339()
+                rec.model,
+                rec.status,
+                rec.error,
+                rec.created_at.to_rfc3339(),
             ],
         )?;
         conn.execute(
@@ -333,10 +429,39 @@ impl Db {
         Ok(rec)
     }
 
+    pub fn update_message_state(
+        &self,
+        id: &str,
+        content: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE messages SET content = ?1, status = ?2, error = ?3 WHERE id = ?4",
+            params![content, status, error, id],
+        )?;
+        tx.execute(
+            "DELETE FROM memory_fts WHERE kind = 'message' AND ref_id = ?1",
+            params![id],
+        )?;
+        if !content.trim().is_empty() && status != "streaming" {
+            tx.execute(
+                "INSERT INTO memory_fts(kind, ref_id, body, created_at)
+                 SELECT 'message', id, content, created_at FROM messages WHERE id = ?1",
+                params![id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_messages(&self, conversation_id: &str) -> Result<Vec<ChatMessageRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, conversation_id, role, content, created_at FROM messages WHERE conversation_id = ?1 ORDER BY created_at ASC",
+            "SELECT id, conversation_id, role, content, model, status, error, created_at
+             FROM messages WHERE conversation_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt
             .query_map(params![conversation_id], |r| {
@@ -345,7 +470,10 @@ impl Db {
                     conversation_id: r.get(1)?,
                     role: r.get(2)?,
                     content: r.get(3)?,
-                    created_at: parse_dt(&r.get::<_, String>(4)?)?,
+                    model: r.get(4)?,
+                    status: r.get(5)?,
+                    error: r.get(6)?,
+                    created_at: parse_dt(&r.get::<_, String>(7)?)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -353,31 +481,172 @@ impl Db {
     }
 
     pub fn search_memory(&self, query: &str, limit: i64) -> Result<Vec<MemoryHit>> {
+        let q = sanitize_fts(query);
+        if q.is_empty() {
+            return Ok(vec![]);
+        }
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
-            SELECT kind, ref_id, snippet(memory_fts, 2, '[', ']', '…', 16), created_at
-            FROM memory_fts
+            SELECT f.kind,
+                   f.ref_id,
+                   CASE WHEN f.kind = 'message'
+                     THEN COALESCE((SELECT m.conversation_id FROM messages m WHERE m.id = f.ref_id), '')
+                     ELSE f.ref_id
+                   END,
+                   CASE WHEN f.kind = 'message'
+                     THEN COALESCE((
+                       SELECT c.title FROM messages m
+                       JOIN conversations c ON c.id = m.conversation_id
+                       WHERE m.id = f.ref_id
+                     ), 'Conversation')
+                     ELSE COALESCE((
+                       SELECT c.app_name || ' — ' || c.title FROM captures c WHERE c.id = f.ref_id
+                     ), 'Capture')
+                   END,
+                   snippet(memory_fts, 2, '[', ']', '…', 16),
+                   f.created_at
+            FROM memory_fts f
             WHERE memory_fts MATCH ?1
             ORDER BY rank
             LIMIT ?2
             "#,
         )?;
-        let q = sanitize_fts(query);
-        if q.is_empty() {
-            return Ok(vec![]);
-        }
         let rows = stmt
             .query_map(params![q, limit], |r| {
                 Ok(MemoryHit {
                     kind: r.get(0)?,
                     ref_id: r.get(1)?,
-                    snippet: r.get(2)?,
-                    created_at: parse_dt(&r.get::<_, String>(3)?)?,
+                    owner_id: r.get(2)?,
+                    source_title: r.get(3)?,
+                    snippet: r.get(4)?,
+                    created_at: parse_dt(&r.get::<_, String>(5)?)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    pub fn set_conversation_context(
+        &self,
+        conversation_id: &str,
+        selections: &[ContextSelection],
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM conversation_context WHERE conversation_id = ?1",
+            params![conversation_id],
+        )?;
+        for selection in selections {
+            tx.execute(
+                "INSERT OR IGNORE INTO conversation_context(conversation_id, capture_id, kind, selected_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    conversation_id,
+                    selection.capture_id,
+                    selection.kind,
+                    Utc::now().to_rfc3339()
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn conversation_context(&self, conversation_id: &str) -> Result<Vec<ContextSelection>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT capture_id, kind FROM conversation_context
+             WHERE conversation_id = ?1 ORDER BY selected_at, capture_id, kind",
+        )?;
+        let rows = stmt
+            .query_map(params![conversation_id], |r| {
+                Ok(ContextSelection {
+                    capture_id: r.get(0)?,
+                    kind: r.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn settings(&self) -> Result<AppSettings> {
+        let defaults = AppSettings::default();
+        Ok(AppSettings {
+            shortcut: self.setting("shortcut")?.unwrap_or(defaults.shortcut),
+            ai_profile: self.setting("ai_profile")?.unwrap_or(defaults.ai_profile),
+            capture_retention_days: self
+                .setting("capture_retention_days")?
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(defaults.capture_retention_days),
+            privacy_acknowledged: self
+                .setting("privacy_acknowledged")?
+                .map(|value| value == "true")
+                .unwrap_or(defaults.privacy_acknowledged),
+            last_active_conversation: self
+                .setting("last_active_conversation")?
+                .filter(|value| !value.is_empty()),
+        })
+    }
+
+    pub fn prune_captures(&self, retention_days: u32) -> Result<usize> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
+        let expired: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id FROM captures WHERE created_at < ?1")?;
+            let rows = stmt
+                .query_map(params![cutoff.to_rfc3339()], |r| r.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for id in &expired {
+            self.delete_capture(id)?;
+        }
+        Ok(expired.len())
+    }
+
+    pub fn diagnostic_counts(&self) -> Result<serde_json::Value> {
+        let conn = self.conn.lock().unwrap();
+        let conversations: i64 =
+            conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))?;
+        let messages: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
+        let captures: i64 = conn.query_row("SELECT COUNT(*) FROM captures", [], |r| r.get(0))?;
+        let interrupted: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE error = 'Interrupted by app restart'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(serde_json::json!({
+            "conversations": conversations,
+            "messages": messages,
+            "captures": captures,
+            "recoveredInterruptedMessages": interrupted,
+        }))
     }
 
     pub fn export_json(&self, export_path: &Path) -> Result<()> {
@@ -417,6 +686,8 @@ impl Db {
                 DELETE FROM messages;
                 DELETE FROM conversations;
                 DELETE FROM captures;
+                UPDATE app_settings SET value = '', updated_at = CURRENT_TIMESTAMP
+                  WHERE key = 'last_active_conversation';
                 ",
             )?;
         }
@@ -499,6 +770,117 @@ mod tests {
         let msgs = db.list_messages(&c.id).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].id, m.id);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn recovers_partial_v2_migration_without_destroying_v1_data() {
+        let dir = std::env::temp_dir().join(format!("lb-v1-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = Connection::open(dir.join("lightbridge.sqlite3")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+            INSERT INTO schema_migrations VALUES (1, '2026-01-01T00:00:00Z');
+            CREATE TABLE conversations (
+              id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE messages (
+              id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+              role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE captures (
+              id TEXT PRIMARY KEY, hwnd INTEGER NOT NULL, process_id INTEGER NOT NULL,
+              process_path TEXT NOT NULL, app_name TEXT NOT NULL, title TEXT NOT NULL,
+              x INTEGER NOT NULL, y INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+              dpi INTEGER NOT NULL, monitor TEXT NOT NULL, image_path TEXT NOT NULL,
+              preview_base64 TEXT NOT NULL, content_hash TEXT NOT NULL, ocr_text TEXT,
+              ocr_status TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE memory_fts USING fts5(
+              kind, ref_id, body, created_at UNINDEXED, tokenize = 'porter unicode61'
+            );
+            INSERT INTO conversations VALUES ('c1', 'Preserved', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+            INSERT INTO messages(id, conversation_id, role, content, created_at)
+              VALUES ('m1', 'c1', 'user', 'still here', '2026-01-01T00:00:00Z');
+            "#,
+        )
+        .unwrap();
+        conn.execute("ALTER TABLE messages ADD COLUMN model TEXT", [])
+            .unwrap();
+        drop(conn);
+
+        let db = Db::open(&dir).unwrap();
+        let messages = db.list_messages("c1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "still here");
+        assert_eq!(messages[0].status, "completed");
+        assert_eq!(db.settings().unwrap().ai_profile, "best");
+        let version: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn memory_hits_include_navigable_owner_and_title() {
+        let dir = std::env::temp_dir().join(format!("lb-search-test-{}", Uuid::new_v4()));
+        let db = Db::open(&dir).unwrap();
+        let conversation = db.create_conversation("Fixture chat").unwrap();
+        db.insert_message(&conversation.id, "user", "unique lighthouse phrase")
+            .unwrap();
+        let hits = db.search_memory("lighthouse", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].owner_id, conversation.id);
+        assert_eq!(hits[0].source_title, "Fixture chat");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn conversation_context_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("lb-context-test-{}", Uuid::new_v4()));
+        let db = Db::open(&dir).unwrap();
+        let conversation = db.create_conversation("Context").unwrap();
+        let capture = CaptureRecord {
+            id: "capture-1".into(),
+            window: WindowInfo {
+                hwnd: 1,
+                process_id: 2,
+                process_path: "fixture.exe".into(),
+                app_name: "fixture".into(),
+                title: "Fixture".into(),
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+                dpi: 96,
+                monitor: "100x100".into(),
+            },
+            image_path: dir.join("captures/capture-1.png").to_string_lossy().into(),
+            preview_base64: "data:image/jpeg;base64,".into(),
+            content_hash: "hash".into(),
+            ocr_text: None,
+            ocr_status: "pending".into(),
+            created_at: Utc::now(),
+        };
+        db.insert_capture(&capture).unwrap();
+        let selections = vec![ContextSelection {
+            capture_id: capture.id,
+            kind: "screenshot".into(),
+        }];
+        db.set_conversation_context(&conversation.id, &selections)
+            .unwrap();
+        assert_eq!(
+            db.conversation_context(&conversation.id).unwrap(),
+            selections
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -31,17 +31,8 @@ export interface CaptureRecord {
 
 export interface ContextItem {
   id: string;
-  sourceType:
-    | 'application'
-    | 'window'
-    | 'screenshot'
-    | 'ocr'
-    | 'clipboard'
-    | 'conversation'
-    | 'capture-history'
-    | 'document'
-    | 'memory'
-    | 'pinned';
+  captureId: string;
+  sourceType: ContextKind;
   sourceName: string;
   createdAt: string;
   included: boolean;
@@ -49,15 +40,26 @@ export interface ContextItem {
   privacy: 'local' | 'sensitive';
   preview: string;
   contentHash: string;
-  sourceRef: string;
-  content: string;
 }
+
+export type ContextKind = 'window' | 'screenshot' | 'ocr';
+
+export interface ContextSelection {
+  captureId: string;
+  kind: ContextKind;
+}
+
+export type AiProfile = 'best' | 'balanced' | 'fast';
+export type MessageStatus = 'streaming' | 'completed' | 'cancelled' | 'failed';
 
 export interface ChatMessageRecord {
   id: string;
   conversationId: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  model: string | null;
+  status: MessageStatus;
+  error: string | null;
   createdAt: string;
 }
 
@@ -68,10 +70,20 @@ export interface ConversationRecord {
   updatedAt: string;
 }
 
+export interface AppSettings {
+  shortcut: string;
+  aiProfile: AiProfile;
+  captureRetentionDays: number;
+  privacyAcknowledged: boolean;
+  lastActiveConversation: string | null;
+}
+
 export const ipc = {
   // Capture / context
   getLastCapture: () => invoke<CaptureRecord | null>('get_last_capture'),
+  getCapture: (id: string) => invoke<CaptureRecord | null>('get_capture', { id }),
   captureForeground: () => invoke<CaptureRecord>('capture_foreground'),
+  recapture: () => invoke<CaptureRecord>('recapture'),
   listCaptures: (limit: number, offset: number) =>
     invoke<CaptureRecord[]>('list_captures', { limit, offset }),
   deleteCapture: (id: string) => invoke<void>('delete_capture', { id }),
@@ -82,14 +94,17 @@ export const ipc = {
     invoke<ConversationRecord>('create_conversation', { title }),
   listMessages: (conversationId: string) =>
     invoke<ChatMessageRecord[]>('list_messages', { conversationId }),
+  getConversationContext: (conversationId: string) =>
+    invoke<ContextSelection[]>('get_conversation_context', { conversationId }),
   deleteConversation: (id: string) => invoke<void>('delete_conversation', { id }),
 
-  // Chat streaming: backend emits chat://delta, chat://done, chat://error
+  // Chat streaming: backend emits deltas plus one persisted terminal event.
   startChat: (args: {
+    streamId: string;
     conversationId: string;
     userMessage: string;
-    contextBlocks: string[];
-    model: string;
+    contextSelections: ContextSelection[];
+    profile: AiProfile;
   }) => invoke<string>('start_chat', args),
   cancelChat: (streamId: string) => invoke<void>('cancel_chat', { streamId }),
 
@@ -104,7 +119,20 @@ export const ipc = {
 
   // Data lifecycle
   exportData: () => invoke<string>('export_data'),
+  exportDiagnostics: () => invoke<string>('export_diagnostics'),
   deleteAllData: () => invoke<void>('delete_all_data'),
+
+  // Persisted app settings
+  getSettings: () => invoke<AppSettings>('get_settings'),
+  setShortcut: (shortcut: string) =>
+    invoke<AppSettings>('set_shortcut', { shortcut }),
+  setAiProfile: (profile: AiProfile) =>
+    invoke<AppSettings>('set_ai_profile', { profile }),
+  setCaptureRetention: (days: number) =>
+    invoke<AppSettings>('set_capture_retention', { days }),
+  acknowledgePrivacy: () => invoke<AppSettings>('acknowledge_privacy'),
+  setLastActiveConversation: (conversationId: string | null) =>
+    invoke<AppSettings>('set_last_active_conversation', { conversationId }),
 
   // Overlay control
   hideOverlay: () => invoke<void>('hide_overlay'),
@@ -113,6 +141,8 @@ export const ipc = {
 export interface MemoryHit {
   kind: 'ocr' | 'message';
   refId: string;
+  ownerId: string;
+  sourceTitle: string;
   snippet: string;
   createdAt: string;
 }
@@ -122,13 +152,16 @@ export interface ChatDelta {
   delta: string;
 }
 
-export interface ChatDone {
+export interface ChatFinished {
   streamId: string;
+  conversationId: string;
   messageId: string;
+  status: MessageStatus;
+  error: string | null;
 }
 
-export interface ChatError {
-  streamId: string;
+export interface CaptureStatus {
+  phase: 'idle' | 'capturing' | 'ocr' | 'ready' | 'failed';
   message: string;
 }
 
@@ -139,10 +172,10 @@ export const events = {
     listen<CaptureRecord>('context://ocr-updated', (e) => cb(e.payload)),
   onChatDelta: (cb: (d: ChatDelta) => void): Promise<UnlistenFn> =>
     listen<ChatDelta>('chat://delta', (e) => cb(e.payload)),
-  onChatDone: (cb: (d: ChatDone) => void): Promise<UnlistenFn> =>
-    listen<ChatDone>('chat://done', (e) => cb(e.payload)),
-  onChatError: (cb: (d: ChatError) => void): Promise<UnlistenFn> =>
-    listen<ChatError>('chat://error', (e) => cb(e.payload)),
-  onOverlayShown: (cb: () => void): Promise<UnlistenFn> =>
-    listen('overlay://shown', () => cb()),
+  onChatFinished: (cb: (d: ChatFinished) => void): Promise<UnlistenFn> =>
+    listen<ChatFinished>('chat://finished', (e) => cb(e.payload)),
+  onCaptureStatus: (cb: (status: CaptureStatus) => void): Promise<UnlistenFn> =>
+    listen<CaptureStatus>('capture://status', (e) => cb(e.payload)),
+  onCaptureRequest: (cb: () => void): Promise<UnlistenFn> =>
+    listen('overlay://capture-request', () => cb()),
 };

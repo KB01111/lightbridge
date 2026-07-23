@@ -15,14 +15,14 @@
 
 | Crate | Decision | Why |
 | --- | --- | --- |
-| `tauri` 2 + plugins `global-shortcut`, `notification` | **Selected** | Overlay lifecycle, tray, shortcut, notifications. |
-| `xcap` | **Selected** | Practical HWND/title window capture on Windows without hand-rolling WGC. Tradeoff: less control than raw Windows Graphics Capture; protected/minimized windows may fail. |
+| `tauri` 2 + plugins `global-shortcut`, `notification`, `updater` | **Selected** | Overlay lifecycle, tray, shortcut, notifications, signed updates. |
+| `xcap` | **Selected** | Exact-HWND capture without hand-rolling WGC. Protected/minimized windows fail with an actionable error. |
 | `windows` (Win32 + WinRT OCR) | **Selected** | Foreground HWND, DPI, process path; `Windows.Media.Ocr` for on-device OCR. |
 | `windows-capture` | **Rejected (v1)** | More powerful WGC binding, higher integration cost; revisit if xcap fails on target apps. |
 | `rusqlite` bundled + FTS5 | **Selected** | Local persistence, WAL, FTS search without a separate DB server. |
 | Vector DB server | **Rejected** | Spec forbids separate vector DB process. Future: sqlite-vss / embedded vectors. |
 | `keyring` | **Selected** | Windows Credential Manager for OpenAI key; never returned to webview. |
-| `reqwest` + rustls | **Selected** | OpenAI Chat Completions streaming from Rust only. |
+| `reqwest` + rustls | **Selected** | OpenAI Responses API multimodal streaming from Rust only. |
 | `image` | **Selected** | PNG/JPEG encode, previews, hashing input. |
 | AgentOS | **Deferred** | Requires packaging sandbox runtime + bindings + action-review pipeline; not faked. |
 
