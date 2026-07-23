@@ -100,6 +100,7 @@ export const ipc = {
 
   // Chat streaming: backend emits deltas plus one persisted terminal event.
   startChat: (args: {
+    streamId: string;
     conversationId: string;
     userMessage: string;
     contextSelections: ContextSelection[];

@@ -1,4 +1,10 @@
-import { useEffect, useMemo, type ReactNode } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { AppShell } from '@astryxdesign/core/AppShell';
@@ -86,6 +92,8 @@ function DrawerContent({ children }: { children: ReactNode }) {
 
 export default function App() {
   const queryClient = useQueryClient();
+  const [settingsReady, setSettingsReady] = useState(false);
+  const didRestoreSession = useRef(false);
   const store = useAppStore();
   const {
     expanded,
@@ -199,29 +207,35 @@ export default function App() {
     if (settings == null) return;
     setProfile(settings.aiProfile);
     if (!settings.privacyAcknowledged) setPrivacyOpen(true);
-    if (
-      useAppStore.getState().conversationId == null &&
-      settings.lastActiveConversation != null
-    ) {
-      setConversationId(settings.lastActiveConversation);
-      void hydrateConversation(settings.lastActiveConversation);
-    } else if (
-      useAppStore.getState().conversationId == null &&
-      useAppStore.getState().capture == null
-    ) {
-      void ipc.getLastCapture().then((lastCapture) => {
-        if (lastCapture != null) useCapture(lastCapture);
-      });
+    if (!didRestoreSession.current) {
+      didRestoreSession.current = true;
+      if (
+        useAppStore.getState().conversationId == null &&
+        settings.lastActiveConversation != null
+      ) {
+        setConversationId(settings.lastActiveConversation);
+        void hydrateConversation(settings.lastActiveConversation);
+      } else if (
+        useAppStore.getState().conversationId == null &&
+        useAppStore.getState().capture == null
+      ) {
+        void ipc.getLastCapture().then((lastCapture) => {
+          if (lastCapture != null) useCapture(lastCapture);
+        });
+      }
     }
+    setSettingsReady(true);
     // Hydrate once per backend settings revision.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsQuery.data]);
 
   useEffect(() => {
-    if (conversationId != null) {
-      void ipc.setLastActiveConversation(conversationId);
-    }
-  }, [conversationId]);
+    if (!settingsReady) return;
+    void ipc
+      .setLastActiveConversation(conversationId)
+      .then((settings) => queryClient.setQueryData(['settings'], settings))
+      .catch((error) => failStream(String(error)));
+  }, [conversationId, failStream, queryClient, settingsReady]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -269,13 +283,15 @@ export default function App() {
       }
       setComposerValue('');
       setExpanded(true);
-      const nextStreamId = await ipc.startChat({
+      const nextStreamId = crypto.randomUUID();
+      startStream(nextStreamId);
+      await ipc.startChat({
+        streamId: nextStreamId,
         conversationId: activeConversation,
         userMessage: text,
         contextSelections: selectionsFromContext(contextItems),
         profile,
       });
-      startStream(nextStreamId);
       await queryClient.invalidateQueries({
         queryKey: ['messages', activeConversation],
       });
@@ -289,6 +305,10 @@ export default function App() {
     streamState === 'streaming',
   );
   const ocrStatus = capture?.ocrStatus;
+  const recapture = () =>
+    void ipc.recapture().catch((error) => {
+      setCaptureStatus({ phase: 'failed', message: String(error) });
+    });
   const ocrDot =
     captureStatus.phase === 'failed' || ocrStatus === 'failed'
       ? { variant: 'error' as const, label: 'Capture needs attention' }
@@ -360,10 +380,13 @@ export default function App() {
           options={PROFILE_OPTIONS}
           onChange={(value) => {
             const next = value as AiProfile;
-            setProfile(next);
-            void ipc.setAiProfile(next).then(() => {
-              void queryClient.invalidateQueries({ queryKey: ['settings'] });
-            });
+            void ipc
+              .setAiProfile(next)
+              .then((settings) => {
+                queryClient.setQueryData(['settings'], settings);
+                setProfile(settings.aiProfile);
+              })
+              .catch((error) => failStream(String(error)));
           }}
         />
       }
@@ -415,11 +438,7 @@ export default function App() {
                   captureStatus.phase === 'capturing' ||
                   captureStatus.phase === 'ocr'
                 }
-                onClick={() =>
-                  void ipc.recapture().catch((error) => {
-                    setCaptureStatus({ phase: 'failed', message: String(error) });
-                  })
-                }
+                onClick={recapture}
               />
               <Button
                 label="History and captures"
@@ -473,7 +492,7 @@ export default function App() {
                 label="Try again"
                 variant="secondary"
                 size="sm"
-                onClick={() => void ipc.recapture()}
+                onClick={recapture}
               />
             }
           />

@@ -40,6 +40,7 @@ export function SettingsDialog() {
   const setContextItems = useAppStore((state) => state.setContextItems);
   const [keyDraft, setKeyDraft] = useState('');
   const [shortcutDraft, setShortcutDraft] = useState('');
+  const [shortcutDirty, setShortcutDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
@@ -54,10 +55,16 @@ export function SettingsDialog() {
   });
 
   useEffect(() => {
-    if (settingsQuery.data != null) {
+    if (!settingsOpen) {
+      setShortcutDirty(false);
+    } else if (!shortcutDirty && settingsQuery.data != null) {
       setShortcutDraft(settingsQuery.data.shortcut);
     }
-  }, [settingsQuery.data]);
+  }, [
+    settingsOpen,
+    settingsQuery.data?.shortcut,
+    shortcutDirty,
+  ]);
 
   const refresh = async () => {
     await Promise.all([
@@ -88,11 +95,13 @@ export function SettingsDialog() {
     try {
       const settings = await ipc.setShortcut(shortcutDraft);
       setShortcutDraft(settings.shortcut);
+      setShortcutDirty(false);
+      queryClient.setQueryData(['settings'], settings);
       setNotice(`Global shortcut changed to ${settings.shortcut}.`);
-      await refresh();
     } catch (error) {
       setNotice(String(error));
       setShortcutDraft(settingsQuery.data?.shortcut ?? 'Ctrl+Shift+Space');
+      setShortcutDirty(false);
     } finally {
       setBusy(false);
     }
@@ -232,11 +241,14 @@ export function SettingsDialog() {
             isDisabled={busy || settings == null}
             onChange={(value) => {
               const profile = value as AiProfile;
-              setProfile(profile);
               setBusy(true);
+              setNotice(null);
               void ipc
                 .setAiProfile(profile)
-                .then(refresh)
+                .then((nextSettings) => {
+                  queryClient.setQueryData(['settings'], nextSettings);
+                  setProfile(nextSettings.aiProfile);
+                })
                 .catch((error) => setNotice(String(error)))
                 .finally(() => setBusy(false));
             }}
@@ -254,7 +266,10 @@ export function SettingsDialog() {
               <TextInput
                 label="Global shortcut"
                 value={shortcutDraft}
-                onChange={setShortcutDraft}
+                onChange={(value) => {
+                  setShortcutDraft(value);
+                  setShortcutDirty(true);
+                }}
                 placeholder="Ctrl+Shift+Space"
                 isLabelHidden
               />

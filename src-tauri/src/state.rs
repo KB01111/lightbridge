@@ -12,6 +12,8 @@ pub struct AppState {
     pub streams: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     /// HWND captured just before overlay focus (set by shortcut path).
     pub pending_target_hwnd: Arc<Mutex<Option<u64>>>,
+    /// Generation token for suppressing status events from stale OCR tasks.
+    pub active_capture_operation: Arc<Mutex<Option<String>>>,
     pub active_shortcut: Arc<Mutex<String>>,
 }
 
@@ -21,6 +23,7 @@ impl AppState {
             db: Arc::new(db),
             streams: Arc::new(Mutex::new(HashMap::new())),
             pending_target_hwnd: Arc::new(Mutex::new(None)),
+            active_capture_operation: Arc::new(Mutex::new(None)),
             active_shortcut: Arc::new(Mutex::new(shortcut)),
         }
     }

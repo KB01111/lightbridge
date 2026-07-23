@@ -90,6 +90,7 @@ pub struct ContextSelection {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartChatArgs {
+    pub stream_id: String,
     pub conversation_id: String,
     pub user_message: String,
     pub context_selections: Vec<ContextSelection>,

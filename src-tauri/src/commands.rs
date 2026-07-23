@@ -199,6 +199,8 @@ fn emit_capture_status(app: &AppHandle, phase: &str, message: &str) {
 }
 
 async fn perform_capture(app: &AppHandle, state: &AppState) -> Result<CaptureRecord> {
+    let operation_id = Uuid::new_v4().to_string();
+    *state.active_capture_operation.lock() = Some(operation_id.clone());
     emit_capture_status(app, "capturing", "Capturing the selected window…");
     let exclude = app
         .get_webview_window("main")
@@ -230,6 +232,7 @@ async fn perform_capture(app: &AppHandle, state: &AppState) -> Result<CaptureRec
     );
     let db = state.db.clone();
     let app_for_ocr = app.clone();
+    let active_capture_operation = state.active_capture_operation.clone();
     let capture_id = rec.id.clone();
     let image_path = PathBuf::from(&rec.image_path);
     tauri::async_runtime::spawn(async move {
@@ -246,7 +249,9 @@ async fn perform_capture(app: &AppHandle, state: &AppState) -> Result<CaptureRec
         if let Ok(Some(full)) = db.get_capture(&capture_id) {
             let _ = app_for_ocr.emit("context://ocr-updated", full);
         }
-        emit_capture_status(&app_for_ocr, "ready", "Capture is ready.");
+        if active_capture_operation.lock().as_deref() == Some(&operation_id) {
+            emit_capture_status(&app_for_ocr, "ready", "Capture is ready.");
+        }
     });
 
     let _ = app.emit("context://captured", &rec);
@@ -373,6 +378,7 @@ pub async fn start_chat(
     if user_message.chars().count() > 40_000 {
         return Err("The message is too long. Shorten it and retry.".into());
     }
+    Uuid::parse_str(&args.stream_id).map_err(|_| "Invalid chat stream identifier.".to_string())?;
     let profile = resolve_profile(&args.profile)
         .ok_or_else(|| "Unsupported AI quality profile.".to_string())?;
     if !state.db.settings().map_err(map_err)?.privacy_acknowledged {
@@ -407,9 +413,16 @@ pub async fn start_chat(
         .map_err(map_err)?;
     let input = openai::build_response_input(&history, &contexts, user_message);
 
-    let stream_id = Uuid::new_v4().to_string();
+    let stream_id = args.stream_id;
     let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
-    state.streams.lock().insert(stream_id.clone(), cancel_tx);
+    if state
+        .streams
+        .lock()
+        .insert(stream_id.clone(), cancel_tx)
+        .is_some()
+    {
+        return Err("That chat stream is already active.".into());
+    }
 
     let db = state.db.clone();
     let streams = state.streams.clone();
@@ -418,9 +431,6 @@ pub async fn start_chat(
     let stream_id_task = stream_id.clone();
     let app_task = app.clone();
     let partial = Arc::new(Mutex::new(String::new()));
-    let checkpoint_partial = partial.clone();
-    let checkpoint_db = db.clone();
-    let checkpoint_id = assistant_id.clone();
 
     tauri::async_runtime::spawn(async move {
         enum Outcome {
@@ -428,6 +438,35 @@ pub async fn start_chat(
             Cancelled,
             Failed(String),
         }
+        let stream_partial = partial.clone();
+        let persistence_partial = partial.clone();
+        let persistence_db = db.clone();
+        let persistence_id = assistant_id.clone();
+        let (checkpoint_stop, mut checkpoint_stop_rx) = tokio::sync::watch::channel(false);
+        let checkpoint_task = tauri::async_runtime::spawn(async move {
+            let mut last_persisted = String::new();
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(750)) => {}
+                    changed = checkpoint_stop_rx.changed() => {
+                        if changed.is_err() || *checkpoint_stop_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+                let text = persistence_partial.lock().clone();
+                if text.is_empty() || text == last_persisted {
+                    continue;
+                }
+                last_persisted.clone_from(&text);
+                let checkpoint_db = persistence_db.clone();
+                let checkpoint_id = persistence_id.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    checkpoint_db.update_message_state(&checkpoint_id, &text, "streaming", None)
+                })
+                .await;
+            }
+        });
         let streamed = openai::stream_response(
             app_task.clone(),
             &api_key,
@@ -435,8 +474,8 @@ pub async fn start_chat(
             input,
             &stream_id_task,
             move |text| {
-                *checkpoint_partial.lock() = text.to_string();
-                checkpoint_db.update_message_state(&checkpoint_id, text, "streaming", None)
+                *stream_partial.lock() = text.to_string();
+                Ok(())
             },
         );
         let outcome = tokio::select! {
@@ -455,17 +494,33 @@ pub async fn start_chat(
                 }
             } => Outcome::Cancelled,
         };
+        let _ = checkpoint_stop.send(true);
+        let _ = checkpoint_task.await;
 
         let (status, error, content) = match outcome {
             Outcome::Completed(content) => ("completed", None, content),
             Outcome::Cancelled => ("cancelled", None, partial.lock().clone()),
             Outcome::Failed(error) => ("failed", Some(error), partial.lock().clone()),
         };
-        let persisted = db.update_message_state(&assistant_id, &content, status, error.as_deref());
+        let persist_db = db.clone();
+        let persist_id = assistant_id.clone();
+        let persist_content = content.clone();
+        let persist_error = error.clone();
+        let persisted = tauri::async_runtime::spawn_blocking(move || {
+            persist_db.update_message_state(
+                &persist_id,
+                &persist_content,
+                status,
+                persist_error.as_deref(),
+            )
+        })
+        .await;
         streams.lock().remove(&stream_id_task);
         let terminal_error = match persisted {
-            Ok(()) => error,
-            Err(_) => Some("The response ended, but LightBridge could not persist it.".into()),
+            Ok(Ok(())) => error,
+            Ok(Err(_)) | Err(_) => {
+                Some("The response ended, but LightBridge could not persist it.".into())
+            }
         };
         let _ = app_task.emit(
             "chat://finished",
@@ -573,11 +628,13 @@ pub fn set_shortcut(
     app.global_shortcut()
         .register(parsed)
         .map_err(|_| "That shortcut is already in use. The previous shortcut is still active.")?;
-    if let Err(error) = app.global_shortcut().unregister(previous.as_str()) {
-        let _ = app.global_shortcut().unregister(parsed);
-        return Err(format!(
-            "Could not replace the shortcut ({error}). The previous shortcut is still active."
-        ));
+    if app.global_shortcut().is_registered(previous.as_str()) {
+        if let Err(error) = app.global_shortcut().unregister(previous.as_str()) {
+            let _ = app.global_shortcut().unregister(parsed);
+            return Err(format!(
+                "Could not replace the shortcut ({error}). The previous shortcut is still active."
+            ));
+        }
     }
     if let Err(error) = state.db.set_setting("shortcut", requested) {
         let _ = app.global_shortcut().unregister(parsed);

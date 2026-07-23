@@ -16,6 +16,18 @@ pub struct Db {
     data_dir: PathBuf,
 }
 
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl Db {
     pub fn open(data_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
@@ -48,7 +60,7 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -117,12 +129,21 @@ impl Db {
             )?;
         }
         if applied.unwrap_or(0) < 2 {
-            conn.execute_batch(
+            let transaction = conn.transaction()?;
+            if !column_exists(&transaction, "messages", "model")? {
+                transaction.execute("ALTER TABLE messages ADD COLUMN model TEXT", [])?;
+            }
+            if !column_exists(&transaction, "messages", "status")? {
+                transaction.execute(
+                    "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
+                    [],
+                )?;
+            }
+            if !column_exists(&transaction, "messages", "error")? {
+                transaction.execute("ALTER TABLE messages ADD COLUMN error TEXT", [])?;
+            }
+            transaction.execute_batch(
                 r#"
-                ALTER TABLE messages ADD COLUMN model TEXT;
-                ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed';
-                ALTER TABLE messages ADD COLUMN error TEXT;
-
                 CREATE TABLE IF NOT EXISTS conversation_context (
                   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
                   capture_id TEXT NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
@@ -145,19 +166,20 @@ impl Db {
                 ("capture_retention_days", "30"),
                 ("privacy_acknowledged", "false"),
             ] {
-                conn.execute(
+                transaction.execute(
                     "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)",
                     params![key, value, now],
                 )?;
             }
-            conn.execute(
+            transaction.execute(
                 "UPDATE messages SET status = 'failed', error = 'Interrupted by app restart' WHERE status = 'streaming'",
                 [],
             )?;
-            conn.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
+            transaction.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
                 params![Utc::now().to_rfc3339()],
             )?;
+            transaction.commit()?;
         }
         Ok(())
     }
@@ -747,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v1_messages_without_destroying_data() {
+    fn recovers_partial_v2_migration_without_destroying_v1_data() {
         let dir = std::env::temp_dir().join(format!("lb-v1-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let conn = Connection::open(dir.join("lightbridge.sqlite3")).unwrap();
@@ -780,6 +802,8 @@ mod tests {
             "#,
         )
         .unwrap();
+        conn.execute("ALTER TABLE messages ADD COLUMN model TEXT", [])
+            .unwrap();
         drop(conn);
 
         let db = Db::open(&dir).unwrap();
@@ -788,6 +812,15 @@ mod tests {
         assert_eq!(messages[0].content, "still here");
         assert_eq!(messages[0].status, "completed");
         assert_eq!(db.settings().unwrap().ai_profile, "best");
+        let version: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -23,8 +23,8 @@ export function PrivacyDialog() {
     setBusy(true);
     setError(null);
     try {
-      await ipc.acknowledgePrivacy();
-      await queryClient.invalidateQueries({ queryKey: ['settings'] });
+      const settings = await ipc.acknowledgePrivacy();
+      queryClient.setQueryData(['settings'], settings);
       setPrivacyOpen(false);
     } catch (reason) {
       setError(String(reason));

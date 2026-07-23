@@ -121,7 +121,7 @@ where
 
     while let Some(chunk) = bytes.next().await {
         let chunk = chunk.context("read provider stream")?;
-        for event in parser.push(&String::from_utf8_lossy(&chunk)) {
+        for event in parser.push(&chunk) {
             match event {
                 ResponseEvent::Delta(delta) => {
                     full.push_str(&delta);
@@ -235,17 +235,23 @@ enum ResponseEvent {
 
 #[derive(Default)]
 struct ResponsesSseParser {
-    buffer: String,
+    buffer: Vec<u8>,
     completed: bool,
 }
 
 impl ResponsesSseParser {
-    fn push(&mut self, chunk: &str) -> Vec<ResponseEvent> {
-        self.buffer.push_str(chunk);
+    fn push(&mut self, chunk: &[u8]) -> Vec<ResponseEvent> {
+        self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
-        while let Some(position) = self.buffer.find('\n') {
-            let line = self.buffer[..position].trim_end_matches('\r').to_string();
-            self.buffer.drain(..=position);
+        while let Some(position) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line = self.buffer.drain(..=position).collect::<Vec<_>>();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            let Ok(line) = std::str::from_utf8(&line) else {
+                continue;
+            };
             let Some(data) = line.strip_prefix("data:") else {
                 continue;
             };
@@ -292,16 +298,16 @@ mod tests {
     fn parses_only_supported_responses_events_across_chunks() {
         let mut parser = ResponsesSseParser::default();
         assert!(parser
-            .push("event: response.output_text.delta\ndata: {\"type\":\"response.output_")
+            .push(b"event: response.output_text.delta\ndata: {\"type\":\"response.output_")
             .is_empty());
         assert_eq!(
-            parser.push("text.delta\",\"delta\":\"Hello\"}\n"),
+            parser.push(b"text.delta\",\"delta\":\"Hello\"}\n"),
             vec![ResponseEvent::Delta("Hello".into())]
         );
         assert_eq!(
             parser.push(
-                "data: {\"type\":\"response.created\"}\n\
-                 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\"}}\n"
+                b"data: {\"type\":\"response.created\"}\n\
+                  data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\"}}\n"
             ),
             vec![ResponseEvent::Completed]
         );
@@ -311,13 +317,25 @@ mod tests {
     fn maps_provider_error_without_leaking_raw_details() {
         let mut parser = ResponsesSseParser::default();
         let events = parser.push(
-            "data: {\"type\":\"error\",\"error\":{\"message\":\"quota secret request body\"}}\n",
+            b"data: {\"type\":\"error\",\"error\":{\"message\":\"quota secret request body\"}}\n",
         );
         assert_eq!(
             events,
             vec![ResponseEvent::Error(Some(
                 "OpenAI is rate limiting this request. Wait a moment and retry.".into()
             ))]
+        );
+    }
+
+    #[test]
+    fn preserves_utf8_split_across_transport_chunks() {
+        let mut parser = ResponsesSseParser::default();
+        let event = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hej 😊\"}\n";
+        let emoji_start = event.find('😊').unwrap();
+        assert!(parser.push(&event.as_bytes()[..emoji_start + 1]).is_empty());
+        assert_eq!(
+            parser.push(&event.as_bytes()[emoji_start + 1..]),
+            vec![ResponseEvent::Delta("Hej 😊".into())]
         );
     }
 
