@@ -2,13 +2,23 @@ import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { Dialog, DialogHeader } from '@astryxdesign/core/Dialog';
+import { AlertDialog } from '@astryxdesign/core/AlertDialog';
 import { VStack, HStack } from '@astryxdesign/core/Layout';
 import { Text } from '@astryxdesign/core/Text';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Button } from '@astryxdesign/core/Button';
 import { Section } from '@astryxdesign/core/Section';
+import { List, ListItem } from '@astryxdesign/core/List';
+import { EmptyState } from '@astryxdesign/core/EmptyState';
+import { Icon } from '@astryxdesign/core/Icon';
+import { Timestamp } from '@astryxdesign/core/Timestamp';
+import {
+  MagnifyingGlassIcon,
+  DocumentTextIcon,
+  ChatBubbleLeftIcon,
+} from '@heroicons/react/24/outline';
 
-import { ipc } from '../lib/ipc';
+import { ipc, type MemoryHit } from '../lib/ipc';
 import { useAppStore } from '../state/appStore';
 
 // Settings: the API key is write-only. It is sent once to the Rust host,
@@ -20,10 +30,18 @@ export function SettingsDialog() {
   const [keyDraft, setKeyDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [memoryQuery, setMemoryQuery] = useState('');
 
   const apiKeyQuery = useQuery({
     queryKey: ['hasApiKey'],
     queryFn: () => ipc.hasApiKey(),
+  });
+
+  const memoryQueryResult = useQuery({
+    queryKey: ['searchMemory', memoryQuery],
+    queryFn: () => ipc.searchMemory(memoryQuery.trim(), 20),
+    enabled: memoryQuery.trim().length > 1,
   });
 
   const saveKey = async () => {
@@ -74,6 +92,7 @@ export function SettingsDialog() {
       setNotice(`Deletion failed: ${String(err)}`);
     } finally {
       setBusy(false);
+      setConfirmDeleteOpen(false);
     }
   };
 
@@ -125,6 +144,58 @@ export function SettingsDialog() {
 
           <VStack gap={2}>
             <Text type="label" weight="semibold">
+              Search memory
+            </Text>
+            <Text type="supporting" color="secondary">
+              Full-text search across past OCR captures and chat messages
+              stored on this machine.
+            </Text>
+            <TextInput
+              label="Search memory"
+              value={memoryQuery}
+              onChange={setMemoryQuery}
+              placeholder="Search captures and messages..."
+              startIcon={MagnifyingGlassIcon}
+              hasClear
+              isLabelHidden
+            />
+            {memoryQuery.trim().length > 1 &&
+              (!memoryQueryResult.isPending &&
+              !memoryQueryResult.isError &&
+              (memoryQueryResult.data == null ||
+              memoryQueryResult.data.length === 0) ? (
+                <EmptyState
+                  title="No matches"
+                  description="Try a different search term."
+                  isCompact
+                />
+              ) : (
+                <List density="compact" hasDividers>
+                  {memoryQueryResult.data?.map((hit: MemoryHit) => (
+                    <ListItem
+                      key={`${hit.kind}:${hit.refId}`}
+                      label={hit.snippet}
+                      description={
+                        <Timestamp value={hit.createdAt} format="auto" />
+                      }
+                      startContent={
+                        <Icon
+                          icon={
+                            hit.kind === 'message'
+                              ? ChatBubbleLeftIcon
+                              : DocumentTextIcon
+                          }
+                          size="sm"
+                        />
+                      }
+                    />
+                  ))}
+                </List>
+              ))}
+          </VStack>
+
+          <VStack gap={2}>
+            <Text type="label" weight="semibold">
               Global shortcut
             </Text>
             <Text type="supporting" color="secondary">
@@ -154,7 +225,7 @@ export function SettingsDialog() {
                 variant="destructive"
                 size="sm"
                 isDisabled={busy}
-                onClick={() => void deleteAll()}
+                onClick={() => setConfirmDeleteOpen(true)}
               />
             </HStack>
           </VStack>
@@ -166,6 +237,15 @@ export function SettingsDialog() {
           )}
         </VStack>
       </Section>
+      <AlertDialog
+        isOpen={confirmDeleteOpen}
+        onOpenChange={setConfirmDeleteOpen}
+        title="Delete all local data?"
+        description="Conversations, captures, and OCR text stored on this machine will be permanently removed. This cannot be undone."
+        actionLabel="Delete all data"
+        isActionLoading={busy}
+        onAction={() => void deleteAll()}
+      />
     </Dialog>
   );
 }

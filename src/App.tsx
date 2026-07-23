@@ -10,7 +10,9 @@ import {
   ChatMessage,
   ChatMessageBubble,
   ChatMessageList,
+  ChatMessageMetadata,
 } from '@astryxdesign/core/Chat';
+import { Timestamp } from '@astryxdesign/core/Timestamp';
 import { Markdown } from '@astryxdesign/core/Markdown';
 import { Token } from '@astryxdesign/core/Token';
 import { Button } from '@astryxdesign/core/Button';
@@ -22,6 +24,8 @@ import { useStreamingText } from '@astryxdesign/core/hooks';
 import {
   ChevronDownIcon,
   ChevronUpIcon,
+  ClipboardDocumentIcon,
+  ClockIcon,
   Cog6ToothIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
@@ -33,6 +37,7 @@ import {
   estimateTokens,
 } from './state/appStore';
 import { SettingsDialog } from './components/SettingsDialog';
+import { HistoryDialog } from './components/HistoryDialog';
 import { useEntryTransition } from './lib/useEntryTransition';
 
 const MODELS = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'];
@@ -96,6 +101,7 @@ export default function App() {
     toggleContextItem,
     removeContextItem,
     setSettingsOpen,
+    setHistoryOpen,
   } = useAppStore();
 
   const messagesQuery = useQuery({
@@ -312,6 +318,14 @@ export default function App() {
         endContent={
           <HStack gap={1} vAlign="center">
             <Button
+              label="History"
+              variant="ghost"
+              size="sm"
+              icon={<Icon icon={ClockIcon} size="sm" />}
+              isIconOnly
+              onClick={() => setHistoryOpen(true)}
+            />
+            <Button
               label="Settings"
               variant="ghost"
               size="sm"
@@ -362,7 +376,40 @@ export default function App() {
                     key={m.id}
                     sender={m.role === 'user' ? 'user' : 'assistant'}>
                     <ChatMessageBubble
-                      variant={m.role === 'user' ? 'filled' : 'ghost'}>
+                      variant={m.role === 'user' ? 'filled' : 'ghost'}
+                      metadata={
+                        m.role === 'assistant' ? (
+                          <ChatMessageMetadata
+                            timestamp={
+                              <Timestamp value={m.createdAt} format="time" />
+                            }
+                            footer={
+                              <HStack gap={1} vAlign="center">
+                                <Button
+                                  label="Copy"
+                                  variant="ghost"
+                                  size="sm"
+                                  icon={
+                                    <Icon
+                                      icon={ClipboardDocumentIcon}
+                                      size="sm"
+                                    />
+                                  }
+                                  isIconOnly
+                                  onClick={() =>
+                                    void navigator.clipboard.writeText(
+                                      m.content,
+                                    )
+                                  }
+                                />
+                                <Text type="supporting" color="secondary">
+                                  {model}
+                                </Text>
+                              </HStack>
+                            }
+                          />
+                        ) : undefined
+                      }>
                       {m.role === 'assistant' ? (
                         <Markdown density="compact">{m.content}</Markdown>
                       ) : (
@@ -392,6 +439,7 @@ export default function App() {
       )}
 
       <SettingsDialog />
+      <HistoryDialog />
     </VStack>
   );
 }
