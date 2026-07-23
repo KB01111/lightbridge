@@ -51,6 +51,7 @@ import {
   contextFromCapture,
   estimateTokens,
   selectionsFromContext,
+  resolveConversationContext,
 } from './state/appStore';
 import { SettingsDialog } from './components/SettingsDialog';
 import { HistoryDialog } from './components/HistoryDialog';
@@ -139,39 +140,41 @@ export default function App() {
     queryFn: () => ipc.getSettings(),
   });
 
-  const useCapture = (nextCapture: NonNullable<typeof capture>) => {
+  const applyCapture = (nextCapture: NonNullable<typeof capture>, preserveIncluded = false) => {
     setCapture(nextCapture);
-    setContextItems(contextFromCapture(nextCapture));
+    const newItems = contextFromCapture(nextCapture);
+    if (preserveIncluded) {
+      const currentItems = useAppStore.getState().contextItems;
+      const includedMap = new Map(
+        currentItems.map((item) => [item.id, item.included]),
+      );
+      const mergedItems = newItems.map((item) => ({
+        ...item,
+        included: includedMap.has(item.id) ? includedMap.get(item.id)! : item.included,
+      }));
+      setContextItems(mergedItems);
+    } else {
+      setContextItems(newItems);
+    }
   };
 
   const hydrateConversation = async (id: string) => {
     const selections = await ipc.getConversationContext(id);
     if (selections.length === 0) return;
-    const captures = await Promise.all(
-      [...new Set(selections.map((selection) => selection.captureId))].map(
-        (captureId) => ipc.getCapture(captureId),
-      ),
+    const { capture, items } = await resolveConversationContext(
+      selections,
+      ipc.getCapture,
     );
-    const selectedKeys = new Set(
-      selections.map(
-        (selection) => `${selection.captureId}:${selection.kind}`,
-      ),
-    );
-    const items = captures
-      .filter((item) => item != null)
-      .flatMap(contextFromCapture)
-      .filter((item) => selectedKeys.has(item.id));
-    const latest = captures.find((item) => item != null);
-    if (latest != null) setCapture(latest);
+    if (capture != null) setCapture(capture);
     setContextItems(items);
   };
 
   useEffect(() => {
     const unlisteners: Array<Promise<() => void>> = [
-      events.onCapture(useCapture),
+      events.onCapture(applyCapture),
       events.onOcrUpdated((updated) => {
         if (useAppStore.getState().capture?.id === updated.id) {
-          useCapture(updated);
+          applyCapture(updated, true);
         }
       }),
       events.onCaptureStatus(setCaptureStatus),
@@ -220,7 +223,7 @@ export default function App() {
         useAppStore.getState().capture == null
       ) {
         void ipc.getLastCapture().then((lastCapture) => {
-          if (lastCapture != null) useCapture(lastCapture);
+          if (lastCapture != null) applyCapture(lastCapture);
         });
       }
     }

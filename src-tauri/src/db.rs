@@ -172,15 +172,20 @@ impl Db {
                 )?;
             }
             transaction.execute(
-                "UPDATE messages SET status = 'failed', error = 'Interrupted by app restart' WHERE status = 'streaming'",
-                [],
-            )?;
-            transaction.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
                 params![Utc::now().to_rfc3339()],
             )?;
             transaction.commit()?;
         }
+        Ok(())
+    }
+
+    pub fn reset_interrupted_streams(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE messages SET status = 'failed', error = 'Interrupted by app restart' WHERE status = 'streaming'",
+            [],
+        )?;
         Ok(())
     }
 
@@ -535,7 +540,7 @@ impl Db {
         )?;
         for selection in selections {
             tx.execute(
-                "INSERT INTO conversation_context(conversation_id, capture_id, kind, selected_at)
+                "INSERT OR IGNORE INTO conversation_context(conversation_id, capture_id, kind, selected_at)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
                     conversation_id,

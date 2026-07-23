@@ -49,6 +49,7 @@ pub fn run() {
         .init();
 
     let database = db::Db::open(&data_dir).expect("open LightBridge database");
+    let _ = database.reset_interrupted_streams();
     let settings = database.settings().expect("load LightBridge settings");
     let _ = database.prune_captures(settings.capture_retention_days);
     let app_state = AppState::new(database, settings.shortcut.clone());

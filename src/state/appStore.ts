@@ -106,6 +106,29 @@ export function selectionsFromContext(
     }));
 }
 
+export async function resolveConversationContext(
+  selections: ContextSelection[],
+  getCapture: (id: string) => Promise<CaptureRecord | null>,
+): Promise<{ capture: CaptureRecord | null; items: ContextItem[] }> {
+  const captureIds = [
+    ...new Set(selections.map((selection) => selection.captureId)),
+  ];
+  const captures = await Promise.all(
+    captureIds.map((captureId) => getCapture(captureId)),
+  );
+  const selectedKeys = new Set(
+    selections.map(
+      (selection) => `${selection.captureId}:${selection.kind}`,
+    ),
+  );
+  const items = captures
+    .filter((capture) => capture != null)
+    .flatMap(contextFromCapture)
+    .filter((item) => selectedKeys.has(item.id));
+  const capture = captures.find((capture) => capture != null) ?? null;
+  return { capture, items };
+}
+
 export const useAppStore = create<AppState>((set) => ({
   expanded: false,
   composerValue: '',

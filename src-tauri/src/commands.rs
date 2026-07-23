@@ -13,6 +13,7 @@ use crate::capture::{
     capture_window_image, make_api_image_base64, persist_capture, resolve_foreground_window,
     resolve_window,
 };
+use crate::db::Db;
 use crate::models::*;
 use crate::ocr;
 use crate::openai::{self, ResolvedContext};
@@ -293,7 +294,7 @@ pub async fn recapture(
 }
 
 fn resolve_contexts(
-    state: &AppState,
+    db: &Db,
     selections: &[ContextSelection],
 ) -> Result<Vec<ResolvedContext>> {
     if selections.len() > 12 {
@@ -301,8 +302,7 @@ fn resolve_contexts(
     }
     let mut seen = HashSet::new();
     let mut image_count = 0;
-    let captures_root = state
-        .db
+    let captures_root = db
         .captures_dir()
         .canonicalize()
         .context("open captures directory")?;
@@ -314,8 +314,7 @@ fn resolve_contexts(
         if !seen.insert((selection.capture_id.clone(), selection.kind.clone())) {
             continue;
         }
-        let capture = state
-            .db
+        let capture = db
             .get_capture(&selection.capture_id)?
             .ok_or_else(|| anyhow!("A selected capture no longer exists. Remove it and retry."))?;
         match selection.kind.as_str() {
@@ -387,7 +386,14 @@ pub async fn start_chat(
     let api_key = secrets::get_openai_api_key()
         .map_err(map_err)?
         .ok_or_else(|| "OpenAI API key not configured. Open Settings to add it.".to_string())?;
-    let contexts = resolve_contexts(state.inner(), &args.context_selections).map_err(map_err)?;
+    let db_for_blocking = state.db.clone();
+    let selections_for_blocking = args.context_selections.clone();
+    let contexts = tauri::async_runtime::spawn_blocking(move || {
+        resolve_contexts(&db_for_blocking, &selections_for_blocking)
+    })
+    .await
+    .map_err(|e| format!("Context resolution task failed: {}", e))?
+    .map_err(map_err)?;
     let history = state
         .db
         .list_messages(&args.conversation_id)

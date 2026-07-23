@@ -23,7 +23,7 @@ import {
 } from '@heroicons/react/24/outline';
 
 import { ipc, type CaptureRecord } from '../lib/ipc';
-import { contextFromCapture, useAppStore } from '../state/appStore';
+import { contextFromCapture, useAppStore, resolveConversationContext } from '../state/appStore';
 
 type LibraryView = 'chats' | 'captures' | 'search';
 type PendingDelete = {
@@ -78,24 +78,12 @@ export function HistoryDialog() {
     setError(null);
     try {
       const selections = await ipc.getConversationContext(id);
-      const captureIds = [
-        ...new Set(selections.map((selection) => selection.captureId)),
-      ];
-      const captures = await Promise.all(
-        captureIds.map((captureId) => ipc.getCapture(captureId)),
+      const { capture, items } = await resolveConversationContext(
+        selections,
+        ipc.getCapture,
       );
-      const selectedKeys = new Set(
-        selections.map(
-          (selection) => `${selection.captureId}:${selection.kind}`,
-        ),
-      );
-      const context = captures
-        .filter((capture) => capture != null)
-        .flatMap(contextFromCapture)
-        .filter((item) => selectedKeys.has(item.id));
-      const activeCapture = captures.find((capture) => capture != null);
-      if (activeCapture != null) setCapture(activeCapture);
-      setContextItems(context);
+      if (capture != null) setCapture(capture);
+      setContextItems(items);
       setConversationId(id);
       setExpanded(true);
       setLibraryOpen(false);
