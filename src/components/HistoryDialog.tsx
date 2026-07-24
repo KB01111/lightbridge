@@ -23,6 +23,7 @@ import {
 } from '@heroicons/react/24/outline';
 
 import { ipc, type CaptureRecord } from '../lib/ipc';
+import { useEntryTransition } from '../lib/useEntryTransition';
 import { contextFromCapture, useAppStore, resolveConversationContext } from '../state/appStore';
 
 type LibraryView = 'chats' | 'captures' | 'search';
@@ -49,6 +50,7 @@ export function HistoryDialog() {
     null,
   );
   const [deleting, setDeleting] = useState(false);
+  const entryStyle = useEntryTransition('fadeIn', '--duration-medium', libraryOpen);
 
   const conversationsQuery = useQuery({
     queryKey: ['conversations'],
@@ -152,7 +154,7 @@ export function HistoryDialog() {
         onOpenChange={setLibraryOpen}
       />
       <Section variant="transparent">
-        <VStack gap={3}>
+        <VStack gap={3} style={entryStyle}>
           <HStack gap={1}>
             <Button
               label="Chats"

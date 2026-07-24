@@ -1,21 +1,4 @@
-async function switchToSurface(surface: 'main' | 'settings') {
-  await browser.waitUntil(
-    async () => {
-      for (const handle of await browser.getWindowHandles()) {
-        await browser.switchToWindow(handle);
-        const label = await browser.execute(
-          () => document.documentElement.dataset.surface,
-        );
-        if (label === surface) return true;
-      }
-      return false;
-    },
-    {
-      timeout: 10_000,
-      timeoutMsg: `The ${surface} surface was not created.`,
-    },
-  );
-}
+import { switchToSurface } from '../support/surfaces';
 
 describe('LightBridge native surfaces', () => {
   it('shows the themed overlay only after readiness and exposes core surfaces', async () => {
