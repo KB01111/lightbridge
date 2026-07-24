@@ -1,95 +1,87 @@
 import { create } from 'zustand';
 import type {
-  AiProfile,
   CaptureRecord,
   CaptureStatus,
   ContextSelection,
   ContextItem,
   MessageStatus,
+  RouteId,
 } from '../lib/ipc';
-
-// Transient UI state only. Backend-owned state (conversations, messages,
-// captures) is fetched with TanStack Query — do not mirror it here.
 
 export type StreamState = 'idle' | 'streaming' | 'error';
 
 interface AppState {
-  expanded: boolean;
   composerValue: string;
   conversationId: string | null;
-  profile: AiProfile;
+  routeId: RouteId;
   streamId: string | null;
   streamState: StreamState;
   streamingText: string;
   streamError: string | null;
   capture: CaptureRecord | null;
   contextItems: ContextItem[];
-  settingsOpen: boolean;
   libraryOpen: boolean;
   privacyOpen: boolean;
   captureStatus: CaptureStatus;
 
-  setExpanded: (v: boolean) => void;
-  setComposerValue: (v: string) => void;
-  setConversationId: (v: string | null) => void;
-  setProfile: (v: AiProfile) => void;
+  setComposerValue: (value: string) => void;
+  setConversationId: (value: string | null) => void;
+  setRouteId: (value: RouteId) => void;
   startStream: (streamId: string) => void;
   appendDelta: (delta: string) => void;
   finishStream: (status: MessageStatus, error: string | null) => void;
   failStream: (message: string) => void;
-  setCapture: (c: CaptureRecord | null) => void;
+  setCapture: (capture: CaptureRecord | null) => void;
   setContextItems: (items: ContextItem[]) => void;
   toggleContextItem: (id: string) => void;
   removeContextItem: (id: string) => void;
-  setSettingsOpen: (v: boolean) => void;
-  setLibraryOpen: (v: boolean) => void;
-  setPrivacyOpen: (v: boolean) => void;
+  setLibraryOpen: (value: boolean) => void;
+  setPrivacyOpen: (value: boolean) => void;
   setCaptureStatus: (status: CaptureStatus) => void;
 }
 
-// Rough token estimate: ~4 chars per token for English text.
 export const estimateTokens = (text: string): number =>
   text.length === 0 ? 0 : Math.ceil(text.length / 4);
 
-export function contextFromCapture(c: CaptureRecord): ContextItem[] {
+export function contextFromCapture(capture: CaptureRecord): ContextItem[] {
   const items: ContextItem[] = [
     {
-      id: `${c.id}:window`,
-      captureId: c.id,
+      id: `${capture.id}:window`,
+      captureId: capture.id,
       sourceType: 'window',
-      sourceName: `${c.window.appName} — ${c.window.title}`,
-      createdAt: c.createdAt,
+      sourceName: `${capture.window.appName} — ${capture.window.title}`,
+      createdAt: capture.createdAt,
       included: true,
-      tokenEstimate: estimateTokens(c.window.title) + 16,
+      tokenEstimate: estimateTokens(capture.window.title) + 16,
       privacy: 'local',
-      preview: c.window.title,
-      contentHash: c.contentHash,
+      preview: capture.window.title,
+      contentHash: capture.contentHash,
     },
     {
-      id: `${c.id}:screenshot`,
-      captureId: c.id,
+      id: `${capture.id}:screenshot`,
+      captureId: capture.id,
       sourceType: 'screenshot',
       sourceName: 'Screenshot',
-      createdAt: c.createdAt,
+      createdAt: capture.createdAt,
       included: true,
       tokenEstimate: 0,
       privacy: 'sensitive',
       preview: 'Window capture image',
-      contentHash: c.contentHash,
+      contentHash: capture.contentHash,
     },
   ];
-  if (c.ocrText != null && c.ocrText.trim().length > 0) {
+  if (capture.ocrText != null && capture.ocrText.trim().length > 0) {
     items.push({
-      id: `${c.id}:ocr`,
-      captureId: c.id,
+      id: `${capture.id}:ocr`,
+      captureId: capture.id,
       sourceType: 'ocr',
       sourceName: 'On-screen text (OCR)',
-      createdAt: c.createdAt,
+      createdAt: capture.createdAt,
       included: true,
-      tokenEstimate: estimateTokens(c.ocrText),
+      tokenEstimate: estimateTokens(capture.ocrText),
       privacy: 'sensitive',
-      preview: c.ocrText.slice(0, 140),
-      contentHash: c.contentHash,
+      preview: capture.ocrText.slice(0, 140),
+      contentHash: capture.contentHash,
     });
   }
   return items;
@@ -125,34 +117,38 @@ export async function resolveConversationContext(
     .filter((capture) => capture != null)
     .flatMap(contextFromCapture)
     .filter((item) => selectedKeys.has(item.id));
-  const capture = captures.find((capture) => capture != null) ?? null;
-  return { capture, items };
+  return {
+    capture: captures.find((capture) => capture != null) ?? null,
+    items,
+  };
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  expanded: false,
   composerValue: '',
   conversationId: null,
-  profile: 'best',
+  routeId: 'best',
   streamId: null,
   streamState: 'idle',
   streamingText: '',
   streamError: null,
   capture: null,
   contextItems: [],
-  settingsOpen: false,
   libraryOpen: false,
   privacyOpen: false,
   captureStatus: { phase: 'idle', message: 'Ready to capture.' },
 
-  setExpanded: (v) => set({ expanded: v }),
-  setComposerValue: (v) => set({ composerValue: v }),
-  setConversationId: (v) => set({ conversationId: v }),
-  setProfile: (v) => set({ profile: v }),
+  setComposerValue: (composerValue) => set({ composerValue }),
+  setConversationId: (conversationId) => set({ conversationId }),
+  setRouteId: (routeId) => set({ routeId }),
   startStream: (streamId) =>
-    set({ streamId, streamState: 'streaming', streamingText: '', streamError: null }),
+    set({
+      streamId,
+      streamState: 'streaming',
+      streamingText: '',
+      streamError: null,
+    }),
   appendDelta: (delta) =>
-    set((s) => ({ streamingText: s.streamingText + delta })),
+    set((state) => ({ streamingText: state.streamingText + delta })),
   finishStream: (status, error) =>
     set({
       streamId: null,
@@ -162,18 +158,19 @@ export const useAppStore = create<AppState>((set) => ({
     }),
   failStream: (message) =>
     set({ streamId: null, streamState: 'error', streamError: message }),
-  setCapture: (c) => set({ capture: c }),
-  setContextItems: (items) => set({ contextItems: items }),
+  setCapture: (capture) => set({ capture }),
+  setContextItems: (contextItems) => set({ contextItems }),
   toggleContextItem: (id) =>
-    set((s) => ({
-      contextItems: s.contextItems.map((it) =>
-        it.id === id ? { ...it, included: !it.included } : it,
+    set((state) => ({
+      contextItems: state.contextItems.map((item) =>
+        item.id === id ? { ...item, included: !item.included } : item,
       ),
     })),
   removeContextItem: (id) =>
-    set((s) => ({ contextItems: s.contextItems.filter((it) => it.id !== id) })),
-  setSettingsOpen: (v) => set({ settingsOpen: v }),
-  setLibraryOpen: (v) => set({ libraryOpen: v }),
-  setPrivacyOpen: (v) => set({ privacyOpen: v }),
-  setCaptureStatus: (status) => set({ captureStatus: status }),
+    set((state) => ({
+      contextItems: state.contextItems.filter((item) => item.id !== id),
+    })),
+  setLibraryOpen: (libraryOpen) => set({ libraryOpen }),
+  setPrivacyOpen: (privacyOpen) => set({ privacyOpen }),
+  setCaptureStatus: (captureStatus) => set({ captureStatus }),
 }));

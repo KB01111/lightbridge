@@ -177,6 +177,44 @@ impl Db {
             )?;
             transaction.commit()?;
         }
+        if applied.unwrap_or(0) < 3 {
+            let transaction = conn.transaction()?;
+            if !column_exists(&transaction, "messages", "provider")? {
+                transaction.execute("ALTER TABLE messages ADD COLUMN provider TEXT", [])?;
+            }
+            transaction.execute(
+                "UPDATE messages SET provider = 'openai'
+                 WHERE provider IS NULL AND model LIKE 'gpt-%'",
+                [],
+            )?;
+            let defaults = AppSettings::default();
+            let now = Utc::now().to_rfc3339();
+            for (key, value) in [
+                ("gateway_mode", defaults.gateway_mode),
+                ("external_gateway_url", String::new()),
+                ("external_gateway_auth", defaults.external_gateway_auth),
+                (
+                    "configured_provider_ids",
+                    serde_json::to_string(&defaults.configured_provider_ids)?,
+                ),
+                (
+                    "model_routes",
+                    serde_json::to_string(&defaults.model_routes)?,
+                ),
+                ("overlay", serde_json::to_string(&defaults.overlay)?),
+                ("appearance", serde_json::to_string(&defaults.appearance)?),
+            ] {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)",
+                    params![key, value, now],
+                )?;
+            }
+            transaction.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?1)",
+                params![Utc::now().to_rfc3339()],
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -388,7 +426,7 @@ impl Db {
         conversation_id: &str,
         role: &str,
         content: &str,
-        model: Option<&str>,
+        provider_model: Option<(&str, &str)>,
         status: &str,
         error: Option<&str>,
     ) -> Result<ChatMessageRecord> {
@@ -397,19 +435,21 @@ impl Db {
             conversation_id: conversation_id.to_string(),
             role: role.to_string(),
             content: content.to_string(),
-            model: model.map(str::to_string),
+            provider: provider_model.map(|(provider, _)| provider.to_string()),
+            model: provider_model.map(|(_, model)| model.to_string()),
             status: status.to_string(),
             error: error.map(str::to_string),
             created_at: Utc::now(),
         };
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO messages(id, conversation_id, role, content, model, status, error, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO messages(id, conversation_id, role, content, provider, model, status, error, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 rec.id,
                 rec.conversation_id,
                 rec.role,
                 rec.content,
+                rec.provider,
                 rec.model,
                 rec.status,
                 rec.error,
@@ -460,7 +500,7 @@ impl Db {
     pub fn list_messages(&self, conversation_id: &str) -> Result<Vec<ChatMessageRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, conversation_id, role, content, model, status, error, created_at
+            "SELECT id, conversation_id, role, content, provider, model, status, error, created_at
              FROM messages WHERE conversation_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt
@@ -470,10 +510,11 @@ impl Db {
                     conversation_id: r.get(1)?,
                     role: r.get(2)?,
                     content: r.get(3)?,
-                    model: r.get(4)?,
-                    status: r.get(5)?,
-                    error: r.get(6)?,
-                    created_at: parse_dt(&r.get::<_, String>(7)?)?,
+                    provider: r.get(4)?,
+                    model: r.get(5)?,
+                    status: r.get(6)?,
+                    error: r.get(7)?,
+                    created_at: parse_dt(&r.get::<_, String>(8)?)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -608,6 +649,31 @@ impl Db {
             last_active_conversation: self
                 .setting("last_active_conversation")?
                 .filter(|value| !value.is_empty()),
+            gateway_mode: self
+                .setting("gateway_mode")?
+                .unwrap_or(defaults.gateway_mode),
+            external_gateway_url: self
+                .setting("external_gateway_url")?
+                .filter(|value| !value.is_empty()),
+            external_gateway_auth: self
+                .setting("external_gateway_auth")?
+                .unwrap_or(defaults.external_gateway_auth),
+            configured_provider_ids: self
+                .setting("configured_provider_ids")?
+                .and_then(|value| serde_json::from_str(&value).ok())
+                .unwrap_or(defaults.configured_provider_ids),
+            model_routes: self
+                .setting("model_routes")?
+                .and_then(|value| serde_json::from_str(&value).ok())
+                .unwrap_or(defaults.model_routes),
+            overlay: self
+                .setting("overlay")?
+                .and_then(|value| serde_json::from_str(&value).ok())
+                .unwrap_or(defaults.overlay),
+            appearance: self
+                .setting("appearance")?
+                .and_then(|value| serde_json::from_str(&value).ok())
+                .unwrap_or(defaults.appearance),
         })
     }
 
@@ -825,7 +891,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         let _ = std::fs::remove_dir_all(dir);
     }
 

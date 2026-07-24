@@ -24,10 +24,16 @@ when the updater public-key placeholder or required signing secrets remain.
 ## Interactive Windows 11 acceptance
 
 - Open a fixture window and invoke the configured global shortcut.
+- Confirm startup shows only the 48×48 orb, with no white overlay flash.
+- Drag the orb across monitors and confirm edge snapping at 100%, 150%, and
+  200% display scaling.
 - Confirm the exact target thumbnail, OCR completion, and a visual answer.
+- Connect one hosted provider and one non-OpenAI or local provider through
+  Bifrost, then verify model discovery and a streamed response from each.
 - Cancel a streamed answer, retry it, restart, and confirm recovery.
 - Reuse and delete captures; search and open their owning chats.
-- Exercise 360, 400, and 480-pixel widths with keyboard-only navigation.
+- Exercise the 520×720 overlay and 900×720 settings surfaces with keyboard-only
+  navigation, reduced motion, forced colors, and 72–100% transparency.
 - Install NSIS, update to the staged build, uninstall, then repeat with MSI.
 - Confirm diagnostics contain no credentials, screenshots, OCR, messages,
   window titles, or process paths.

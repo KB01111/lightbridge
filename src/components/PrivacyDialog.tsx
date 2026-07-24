@@ -52,9 +52,10 @@ export function PrivacyDialog() {
             leave selected, and only when you press Send.
           </Text>
           <Text type="supporting" color="secondary">
-            Your OpenAI API key is stored in Windows Credential Manager.
-            Diagnostics exclude credentials, screenshots, OCR, message text,
-            window titles, and process paths.
+            Provider credentials are stored in Windows Credential Manager and
+            supplied only to the local Bifrost gateway. Diagnostics exclude
+            credentials, screenshots, OCR, message text, window titles, and
+            process paths.
           </Text>
           {error != null && (
             <Text type="supporting" color="secondary">
@@ -66,7 +67,7 @@ export function PrivacyDialog() {
               label="Open settings"
               variant="secondary"
               isDisabled={busy}
-              onClick={() => useAppStore.getState().setSettingsOpen(true)}
+              onClick={() => void ipc.showSettings()}
             />
             <Button
               label="I understand"

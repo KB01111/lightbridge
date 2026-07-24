@@ -39,7 +39,6 @@ export function HistoryDialog() {
   const conversationId = useAppStore((state) => state.conversationId);
   const setConversationId = useAppStore((state) => state.setConversationId);
   const setComposerValue = useAppStore((state) => state.setComposerValue);
-  const setExpanded = useAppStore((state) => state.setExpanded);
   const setCapture = useAppStore((state) => state.setCapture);
   const setContextItems = useAppStore((state) => state.setContextItems);
   const streamState = useAppStore((state) => state.streamState);
@@ -85,7 +84,6 @@ export function HistoryDialog() {
       if (capture != null) setCapture(capture);
       setContextItems(items);
       setConversationId(id);
-      setExpanded(true);
       setLibraryOpen(false);
     } catch (reason) {
       setError(`Could not open conversation: ${String(reason)}`);
@@ -133,7 +131,6 @@ export function HistoryDialog() {
     if (streamState === 'streaming') return;
     setConversationId(null);
     setComposerValue('');
-    setExpanded(true);
     setLibraryOpen(false);
   };
 

@@ -1,11 +1,6 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { AppShell } from '@astryxdesign/core/AppShell';
 import { HStack, VStack, StackItem } from '@astryxdesign/core/Layout';
@@ -28,24 +23,22 @@ import { Selector } from '@astryxdesign/core/Selector';
 import { StatusDot } from '@astryxdesign/core/StatusDot';
 import { Thumbnail } from '@astryxdesign/core/Thumbnail';
 import { Toolbar } from '@astryxdesign/core/Toolbar';
-import { Banner } from '@astryxdesign/core';
+import { Banner } from '@astryxdesign/core/Banner';
+import { EmptyState } from '@astryxdesign/core/EmptyState';
 import { useStreamingText } from '@astryxdesign/core/hooks';
 import {
   ArrowPathIcon,
-  ChevronDownIcon,
-  ChevronUpIcon,
+  BoltIcon,
   ClipboardDocumentIcon,
   ClockIcon,
   Cog6ToothIcon,
+  PlusIcon,
   ShieldCheckIcon,
+  SparklesIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 
-import {
-  ipc,
-  events,
-  type AiProfile,
-} from './lib/ipc';
+import { events, ipc } from './lib/ipc';
 import {
   useAppStore,
   contextFromCapture,
@@ -53,54 +46,18 @@ import {
   selectionsFromContext,
   resolveConversationContext,
 } from './state/appStore';
-import { SettingsDialog } from './components/SettingsDialog';
 import { HistoryDialog } from './components/HistoryDialog';
 import { PrivacyDialog } from './components/PrivacyDialog';
-import { useEntryTransition } from './lib/useEntryTransition';
-
-const PROFILE_OPTIONS = [
-  { value: 'best', label: 'Best · Sol' },
-  { value: 'balanced', label: 'Balanced · Terra' },
-  { value: 'fast', label: 'Fast · Luna' },
-];
-
-function ExpandedPanel({ children }: { children: ReactNode }) {
-  const entry = useEntryTransition('slideUp');
-  return (
-    <StackItem size="fill" style={{ minHeight: 0, ...entry }}>
-      {children}
-    </StackItem>
-  );
-}
-
-function CollapsedComposer({ children }: { children: ReactNode }) {
-  const entry = useEntryTransition('slideDown', '--duration-fast');
-  return (
-    <VStack gap={0} style={{ padding: 'var(--spacing-2)', ...entry }}>
-      {children}
-    </VStack>
-  );
-}
-
-function DrawerContent({ children }: { children: ReactNode }) {
-  const entry = useEntryTransition('fadeIn', '--duration-fast');
-  return (
-    <HStack gap={1} wrap="wrap" vAlign="center" style={entry}>
-      {children}
-    </HStack>
-  );
-}
+import { useSurfaceReady } from './lib/useSurfaceReady';
 
 export default function App() {
   const queryClient = useQueryClient();
-  const [settingsReady, setSettingsReady] = useState(false);
   const didRestoreSession = useRef(false);
-  const store = useAppStore();
+  const [lastSubmitted, setLastSubmitted] = useState('');
   const {
-    expanded,
     composerValue,
     conversationId,
-    profile,
+    routeId,
     streamId,
     streamState,
     streamingText,
@@ -108,10 +65,9 @@ export default function App() {
     capture,
     contextItems,
     captureStatus,
-    setExpanded,
     setComposerValue,
     setConversationId,
-    setProfile,
+    setRouteId,
     startStream,
     appendDelta,
     finishStream,
@@ -120,58 +76,64 @@ export default function App() {
     setContextItems,
     toggleContextItem,
     removeContextItem,
-    setSettingsOpen,
     setLibraryOpen,
     setPrivacyOpen,
     setCaptureStatus,
-  } = store;
+  } = useAppStore();
 
+  const settingsQuery = useQuery({
+    queryKey: ['settings'],
+    queryFn: ipc.getSettings,
+  });
+  useSurfaceReady('main', settingsQuery.isFetched);
+  const gatewayQuery = useQuery({
+    queryKey: ['gatewayStatus'],
+    queryFn: ipc.getGatewayStatus,
+    refetchInterval: 15_000,
+  });
   const messagesQuery = useQuery({
     queryKey: ['messages', conversationId],
     queryFn: () => ipc.listMessages(conversationId!),
     enabled: conversationId != null,
   });
-  const apiKeyQuery = useQuery({
-    queryKey: ['hasApiKey'],
-    queryFn: () => ipc.hasApiKey(),
-  });
-  const settingsQuery = useQuery({
-    queryKey: ['settings'],
-    queryFn: () => ipc.getSettings(),
-  });
 
-  const applyCapture = (nextCapture: NonNullable<typeof capture>, preserveIncluded = false) => {
+  const applyCapture = (
+    nextCapture: NonNullable<typeof capture>,
+    preserveIncluded = false,
+  ) => {
     setCapture(nextCapture);
     const newItems = contextFromCapture(nextCapture);
-    if (preserveIncluded) {
-      const currentItems = useAppStore.getState().contextItems;
-      const includedMap = new Map(
-        currentItems.map((item) => [item.id, item.included]),
-      );
-      const mergedItems = newItems.map((item) => ({
-        ...item,
-        included: includedMap.has(item.id) ? includedMap.get(item.id)! : item.included,
-      }));
-      setContextItems(mergedItems);
-    } else {
+    if (!preserveIncluded) {
       setContextItems(newItems);
+      return;
     }
+    const includedMap = new Map(
+      useAppStore
+        .getState()
+        .contextItems.map((item) => [item.id, item.included]),
+    );
+    setContextItems(
+      newItems.map((item) => ({
+        ...item,
+        included: includedMap.get(item.id) ?? item.included,
+      })),
+    );
   };
 
   const hydrateConversation = async (id: string) => {
     const selections = await ipc.getConversationContext(id);
     if (selections.length === 0) return;
-    const { capture, items } = await resolveConversationContext(
+    const resolved = await resolveConversationContext(
       selections,
       ipc.getCapture,
     );
-    if (capture != null) setCapture(capture);
-    setContextItems(items);
+    if (resolved.capture != null) setCapture(resolved.capture);
+    setContextItems(resolved.items);
   };
 
   useEffect(() => {
-    const unlisteners: Array<Promise<() => void>> = [
-      events.onCapture(applyCapture),
+    const unlisteners = [
+      events.onCapture((nextCapture) => applyCapture(nextCapture)),
       events.onOcrUpdated((updated) => {
         if (useAppStore.getState().capture?.id === updated.id) {
           applyCapture(updated, true);
@@ -197,60 +159,62 @@ export default function App() {
           setCaptureStatus({ phase: 'failed', message: String(error) });
         });
       }),
+      events.onGatewayStatus((status) => {
+        queryClient.setQueryData(['gatewayStatus'], status);
+      }),
+      events.onSettingsChanged(() => {
+        void queryClient.invalidateQueries({ queryKey: ['settings'] });
+        void queryClient.invalidateQueries({ queryKey: ['gatewayStatus'] });
+      }),
     ];
     return () => {
-      for (const listener of unlisteners) void listener.then((unlisten) => unlisten());
+      for (const listener of unlisteners) {
+        void listener.then((unlisten) => unlisten());
+      }
     };
-    // The event bridge is intentionally mounted once.
+    // Event bridges intentionally mount once per webview.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     const settings = settingsQuery.data;
     if (settings == null) return;
-    setProfile(settings.aiProfile);
+    setRouteId(settings.aiProfile);
     if (!settings.privacyAcknowledged) setPrivacyOpen(true);
-    if (!didRestoreSession.current) {
-      didRestoreSession.current = true;
-      if (
-        useAppStore.getState().conversationId == null &&
-        settings.lastActiveConversation != null
-      ) {
-        setConversationId(settings.lastActiveConversation);
-        void hydrateConversation(settings.lastActiveConversation);
-      } else if (
-        useAppStore.getState().conversationId == null &&
-        useAppStore.getState().capture == null
-      ) {
-        void ipc.getLastCapture().then((lastCapture) => {
-          if (lastCapture != null) applyCapture(lastCapture);
-        });
-      }
+    if (didRestoreSession.current) return;
+    didRestoreSession.current = true;
+    if (settings.lastActiveConversation != null) {
+      setConversationId(settings.lastActiveConversation);
+      void hydrateConversation(settings.lastActiveConversation);
+    } else {
+      void ipc.getLastCapture().then((lastCapture) => {
+        if (lastCapture != null) applyCapture(lastCapture);
+      });
     }
-    setSettingsReady(true);
-    // Hydrate once per backend settings revision.
+    // Hydrate once from persisted backend state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsQuery.data]);
 
   useEffect(() => {
-    if (!settingsReady) return;
+    if (!didRestoreSession.current) return;
     void ipc
       .setLastActiveConversation(conversationId)
       .then((settings) => queryClient.setQueryData(['settings'], settings))
       .catch((error) => failStream(String(error)));
-  }, [conversationId, failStream, queryClient, settingsReady]);
+  }, [conversationId, failStream, queryClient]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') void ipc.hideOverlay();
-      if (event.key === 'e' && event.ctrlKey) {
+      if (event.key.toLowerCase() === 'n' && event.ctrlKey) {
         event.preventDefault();
-        setExpanded(!useAppStore.getState().expanded);
+        setConversationId(null);
+        setComposerValue('');
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [setExpanded]);
+  }, [setComposerValue, setConversationId]);
 
   const includedItems = useMemo(
     () => contextItems.filter((item) => item.included),
@@ -260,7 +224,7 @@ export default function App() {
     () =>
       includedItems.reduce((total, item) => total + item.tokenEstimate, 0) +
       estimateTokens(composerValue),
-    [includedItems, composerValue],
+    [composerValue, includedItems],
   );
   const hasSensitiveContext = includedItems.some(
     (item) => item.privacy === 'sensitive',
@@ -273,8 +237,8 @@ export default function App() {
       setPrivacyOpen(true);
       return;
     }
-    if (apiKeyQuery.data !== true) {
-      setSettingsOpen(true);
+    if (gatewayQuery.data?.healthy !== true) {
+      await ipc.showSettings();
       return;
     }
     try {
@@ -284,8 +248,8 @@ export default function App() {
         activeConversation = conversation.id;
         setConversationId(activeConversation);
       }
+      setLastSubmitted(text);
       setComposerValue('');
-      setExpanded(true);
       const nextStreamId = crypto.randomUUID();
       startStream(nextStreamId);
       await ipc.startChat({
@@ -293,7 +257,7 @@ export default function App() {
         conversationId: activeConversation,
         userMessage: text,
         contextSelections: selectionsFromContext(contextItems),
-        profile,
+        routeId,
       });
       await queryClient.invalidateQueries({
         queryKey: ['messages', activeConversation],
@@ -307,24 +271,17 @@ export default function App() {
     streamingText,
     streamState === 'streaming',
   );
-  const ocrStatus = capture?.ocrStatus;
-  const recapture = () =>
-    void ipc.recapture().catch((error) => {
-      setCaptureStatus({ phase: 'failed', message: String(error) });
-    });
-  const ocrDot =
-    captureStatus.phase === 'failed' || ocrStatus === 'failed'
-      ? { variant: 'error' as const, label: 'Capture needs attention' }
-      : captureStatus.phase === 'capturing' || captureStatus.phase === 'ocr'
-        ? { variant: 'accent' as const, label: captureStatus.message }
-        : ocrStatus === 'done'
-          ? { variant: 'success' as const, label: 'Capture ready' }
-          : { variant: 'neutral' as const, label: 'No active capture' };
-
-  const drawer =
+  const captureBusy =
+    captureStatus.phase === 'capturing' || captureStatus.phase === 'ocr';
+  const gatewayReady = gatewayQuery.data?.healthy === true;
+  const routeOptions = (settingsQuery.data?.modelRoutes ?? []).map((route) => ({
+    value: route.id,
+    label: `${route.label} · ${route.model}`,
+  }));
+  const contextDrawer =
     contextItems.length > 0 ? (
       <ChatComposerDrawer count={contextItems.length} label="Context">
-        <DrawerContent>
+        <HStack gap={1} wrap="wrap" vAlign="center">
           {capture != null && (
             <Thumbnail
               src={capture.previewBase64}
@@ -344,12 +301,12 @@ export default function App() {
           ))}
           {hasSensitiveContext && (
             <Token
-              label="Sensitive · sent only on Send"
+              label="Sent only when you press Send"
               color="orange"
               icon={<Icon icon={ShieldCheckIcon} size="sm" />}
             />
           )}
-        </DrawerContent>
+        </HStack>
       </ChatComposerDrawer>
     ) : undefined;
 
@@ -365,29 +322,28 @@ export default function App() {
       placeholder={
         capture != null
           ? `Ask about ${capture.window.appName}…`
-          : 'Ask LightBridge…'
+          : 'Ask LightBridge anything…'
       }
       density="compact"
-      drawer={drawer}
+      drawer={contextDrawer}
       headerContext={
         <Text type="supporting" color="secondary">
-          ~{totalTokens} tokens · {includedItems.length} context
+          ~{totalTokens} tokens · {includedItems.length} selected
         </Text>
       }
       footerActions={
         <Selector
-          label="Answer quality"
+          label="Model route"
           isLabelHidden
           size="sm"
-          value={profile}
-          options={PROFILE_OPTIONS}
-          onChange={(value) => {
-            const next = value as AiProfile;
+          value={routeId}
+          options={routeOptions}
+          onChange={(nextRoute) => {
             void ipc
-              .setAiProfile(next)
+              .setAiProfile(nextRoute)
               .then((settings) => {
                 queryClient.setQueryData(['settings'], settings);
-                setProfile(settings.aiProfile);
+                setRouteId(settings.aiProfile);
               })
               .catch((error) => failStream(String(error)));
           }}
@@ -396,33 +352,44 @@ export default function App() {
       status={
         streamState === 'error' && streamError != null
           ? { type: 'error', message: streamError }
-          : undefined
+          : !gatewayReady
+            ? { type: 'warning', message: 'Connect a provider in Settings.' }
+            : undefined
       }
     />
   );
 
   return (
-    <AppShell height="fill" variant="surface" contentPadding={0}>
-      <VStack style={{ height: '100%', width: '100%' }}>
+    <AppShell
+      height="fill"
+      variant="surface"
+      contentPadding={0}>
+      <VStack style={{ height: '100%', minHeight: 0 }}>
         <Toolbar
-          label="LightBridge"
-          dividers={expanded ? ['bottom'] : []}
+          label="LightBridge overlay"
+          dividers={['bottom']}
           startContent={
             <HStack gap={2} vAlign="center">
               <StatusDot
-                variant={ocrDot.variant}
-                label={ocrDot.label}
-                tooltip={ocrDot.label}
-                isPulsing={
-                  captureStatus.phase === 'capturing' ||
-                  captureStatus.phase === 'ocr'
+                variant={
+                  captureBusy
+                    ? 'accent'
+                    : gatewayReady
+                      ? 'success'
+                      : 'warning'
                 }
+                label={
+                  captureBusy
+                    ? captureStatus.message
+                    : gatewayQuery.data?.message ?? 'Checking Bifrost'
+                }
+                isPulsing={captureBusy || streamState === 'streaming'}
               />
               <VStack gap={0}>
                 <Text type="label" weight="semibold">
                   {capture?.window.appName ?? 'LightBridge'}
                 </Text>
-                <Text type="supporting" color="secondary">
+                <Text type="supporting" color="secondary" maxLines={1}>
                   {capture?.window.title ??
                     `Press ${settingsQuery.data?.shortcut ?? 'Ctrl+Shift+Space'} over any window`}
                 </Text>
@@ -432,62 +399,84 @@ export default function App() {
           endContent={
             <HStack gap={1} vAlign="center">
               <Button
+                label="New conversation"
+                variant="ghost"
+                size="sm"
+                isIconOnly
+                icon={<Icon icon={PlusIcon} size="sm" />}
+                isDisabled={streamState === 'streaming'}
+                onClick={() => {
+                  setConversationId(null);
+                  setComposerValue('');
+                }}
+              />
+              <Button
                 label="Recapture"
                 variant="ghost"
                 size="sm"
-                icon={<Icon icon={ArrowPathIcon} size="sm" />}
                 isIconOnly
-                isDisabled={
-                  captureStatus.phase === 'capturing' ||
-                  captureStatus.phase === 'ocr'
+                icon={<Icon icon={ArrowPathIcon} size="sm" />}
+                isDisabled={captureBusy}
+                onClick={() =>
+                  void ipc.recapture().catch((error) =>
+                    setCaptureStatus({
+                      phase: 'failed',
+                      message: String(error),
+                    }),
+                  )
                 }
-                onClick={recapture}
               />
               <Button
                 label="History and captures"
                 variant="ghost"
                 size="sm"
-                icon={<Icon icon={ClockIcon} size="sm" />}
                 isIconOnly
+                icon={<Icon icon={ClockIcon} size="sm" />}
                 onClick={() => setLibraryOpen(true)}
               />
               <Button
                 label="Settings"
                 variant="ghost"
                 size="sm"
+                isIconOnly
                 icon={<Icon icon={Cog6ToothIcon} size="sm" />}
-                isIconOnly
-                onClick={() => setSettingsOpen(true)}
-              />
-              <Button
-                label={expanded ? 'Collapse' : 'Expand'}
-                variant="ghost"
-                size="sm"
-                icon={
-                  <Icon
-                    icon={expanded ? ChevronUpIcon : ChevronDownIcon}
-                    size="sm"
-                  />
-                }
-                isIconOnly
-                onClick={() => setExpanded(!expanded)}
+                onClick={() => void ipc.showSettings()}
               />
               <Button
                 label="Hide"
                 variant="ghost"
                 size="sm"
-                icon={<Icon icon={XMarkIcon} size="sm" />}
                 isIconOnly
+                icon={<Icon icon={XMarkIcon} size="sm" />}
                 onClick={() => void ipc.hideOverlay()}
               />
             </HStack>
           }
+          onPointerDown={(event) => {
+            if ((event.target as HTMLElement).closest('button') == null) {
+              void getCurrentWindow().startDragging();
+            }
+          }}
         />
 
+        {!gatewayReady && (
+          <Banner
+            status="warning"
+            title="Connect a model provider"
+            description="LightBridge uses Bifrost for every AI request."
+            endContent={
+              <Button
+                label="Open settings"
+                variant="primary"
+                size="sm"
+                onClick={() => void ipc.showSettings()}
+              />
+            }
+          />
+        )}
         {captureStatus.phase === 'failed' && (
           <Banner
             status="error"
-            container="section"
             title="Capture failed"
             description={captureStatus.message}
             endContent={
@@ -495,140 +484,162 @@ export default function App() {
                 label="Try again"
                 variant="secondary"
                 size="sm"
-                onClick={recapture}
+                onClick={() => void ipc.recapture()}
               />
             }
           />
         )}
 
-        {expanded ? (
-          <ExpandedPanel>
-            <ChatLayout
+        <StackItem size="fill" style={{ minHeight: 0 }}>
+          <ChatLayout
+            density="compact"
+            style={{ height: '100%' }}
+            composer={composer}>
+            <ChatMessageList
               density="compact"
-              style={{ height: '100%' }}
-              composer={composer}>
-              <ChatMessageList
-                density="compact"
-                isStreaming={streamState === 'streaming'}
-                emptyState={
-                  messagesQuery.isPending ? (
-                    <Text type="supporting" color="secondary">
-                      Loading conversation…
-                    </Text>
-                  ) : messagesQuery.isError ? (
-                    <Text type="supporting" color="secondary">
-                      Could not load this conversation.
-                    </Text>
-                  ) : (
-                    <Text type="supporting" color="secondary">
-                      Capture a window, choose context, and ask a question.
-                    </Text>
-                  )
-                }>
-                {(messagesQuery.data ?? [])
-                  .filter(
-                    (message) =>
-                      message.role !== 'system' &&
-                      message.status !== 'streaming',
-                  )
-                  .map((message) => (
-                    <ChatMessage
-                      key={message.id}
-                      sender={
-                        message.role === 'user' ? 'user' : 'assistant'
-                      }>
-                      <ChatMessageBubble
-                        variant={
-                          message.role === 'user' ? 'filled' : 'ghost'
-                        }
-                        metadata={
-                          message.role === 'assistant' ? (
-                            <ChatMessageMetadata
-                              timestamp={
-                                <Timestamp
-                                  value={message.createdAt}
-                                  format="time"
+              isStreaming={streamState === 'streaming'}
+              emptyState={
+                messagesQuery.isPending && conversationId != null ? (
+                  <Text type="supporting" color="secondary">
+                    Loading conversation…
+                  </Text>
+                ) : (
+                  <EmptyState
+                    title="Bring any window into the conversation"
+                    description="Capture the active app, review the selected context, then ask a question."
+                    icon={<Icon icon={SparklesIcon} size="lg" />}
+                    isCompact
+                    actions={
+                      <HStack gap={2}>
+                        <Button
+                          label="Capture window"
+                          variant="primary"
+                          icon={<Icon icon={BoltIcon} size="sm" />}
+                          onClick={() => void ipc.captureForeground()}
+                        />
+                        <Button
+                          label="Open history"
+                          variant="secondary"
+                          onClick={() => setLibraryOpen(true)}
+                        />
+                      </HStack>
+                    }
+                  />
+                )
+              }>
+              {(messagesQuery.data ?? [])
+                .filter(
+                  (message) =>
+                    message.role !== 'system' &&
+                    message.status !== 'streaming',
+                )
+                .map((message) => (
+                  <ChatMessage
+                    key={message.id}
+                    sender={message.role === 'user' ? 'user' : 'assistant'}>
+                    <ChatMessageBubble
+                      variant={message.role === 'user' ? 'filled' : 'ghost'}
+                      metadata={
+                        message.role === 'assistant' ? (
+                          <ChatMessageMetadata
+                            timestamp={
+                              <Timestamp
+                                value={message.createdAt}
+                                format="time"
+                              />
+                            }
+                            footer={
+                              <HStack gap={1} vAlign="center">
+                                <StatusDot
+                                  variant={
+                                    message.status === 'completed'
+                                      ? 'success'
+                                      : message.status === 'cancelled'
+                                        ? 'neutral'
+                                        : 'error'
+                                  }
+                                  label={message.status}
                                 />
-                              }
-                              footer={
-                                <HStack gap={1} vAlign="center">
-                                  <StatusDot
-                                    variant={
-                                      message.status === 'completed'
-                                        ? 'success'
-                                        : message.status === 'cancelled'
-                                          ? 'neutral'
-                                          : 'error'
-                                    }
-                                    label={message.status}
-                                    tooltip={
-                                      message.error ?? message.status
-                                    }
-                                  />
-                                  <Button
-                                    label="Copy"
-                                    variant="ghost"
-                                    size="sm"
-                                    icon={
-                                      <Icon
-                                        icon={ClipboardDocumentIcon}
-                                        size="sm"
-                                      />
-                                    }
-                                    isIconOnly
-                                    onClick={() =>
-                                      void navigator.clipboard.writeText(
-                                        message.content,
-                                      )
-                                    }
-                                  />
-                                  <Text type="supporting" color="secondary">
-                                    {message.model ?? 'Unknown model'}
-                                  </Text>
-                                </HStack>
-                              }
-                            />
-                          ) : undefined
-                        }>
-                        {message.role === 'assistant' ? (
-                          message.content.length > 0 ? (
-                            <Markdown density="compact">
-                              {message.content}
-                            </Markdown>
-                          ) : (
-                            <Text type="supporting" color="secondary">
-                              No response text was saved.
-                            </Text>
-                          )
+                                <Text type="supporting" color="secondary">
+                                  {message.model ?? 'Unknown model'}
+                                </Text>
+                                <Button
+                                  label="Copy response"
+                                  variant="ghost"
+                                  size="sm"
+                                  isIconOnly
+                                  icon={
+                                    <Icon
+                                      icon={ClipboardDocumentIcon}
+                                      size="sm"
+                                    />
+                                  }
+                                  onClick={() =>
+                                    void navigator.clipboard.writeText(
+                                      message.content,
+                                    )
+                                  }
+                                />
+                              </HStack>
+                            }
+                          />
+                        ) : undefined
+                      }>
+                      {message.role === 'assistant' ? (
+                        message.content.length > 0 ? (
+                          <Markdown density="compact">
+                            {message.content}
+                          </Markdown>
                         ) : (
-                          message.content
-                        )}
-                      </ChatMessageBubble>
-                    </ChatMessage>
-                  ))}
-                {streamState === 'streaming' && (
-                  <ChatMessage sender="assistant">
-                    <ChatMessageBubble variant="ghost">
-                      {displayedStreamingText.length > 0 ? (
-                        <Markdown density="compact">
-                          {displayedStreamingText}
-                        </Markdown>
+                          <Text type="supporting" color="secondary">
+                            No response text was saved.
+                          </Text>
+                        )
                       ) : (
-                        <Text type="supporting" color="secondary">
-                          Thinking…
-                        </Text>
+                        message.content
                       )}
                     </ChatMessageBubble>
                   </ChatMessage>
-                )}
-              </ChatMessageList>
-            </ChatLayout>
-          </ExpandedPanel>
-        ) : (
-          <CollapsedComposer>{composer}</CollapsedComposer>
-        )}
+                ))}
+              {streamState === 'streaming' && (
+                <ChatMessage sender="assistant">
+                  <ChatMessageBubble variant="ghost">
+                    {displayedStreamingText.length > 0 ? (
+                      <Markdown density="compact">
+                        {displayedStreamingText}
+                      </Markdown>
+                    ) : (
+                      <VStack gap={1}>
+                        <Text type="supporting" color="secondary">
+                          Bifrost is choosing the best route…
+                        </Text>
+                        <StatusDot
+                          variant="accent"
+                          label="Generating"
+                          isPulsing
+                        />
+                      </VStack>
+                    )}
+                  </ChatMessageBubble>
+                </ChatMessage>
+              )}
+            </ChatMessageList>
+          </ChatLayout>
+        </StackItem>
 
-        <SettingsDialog />
+        {streamState === 'error' && lastSubmitted.length > 0 && (
+          <HStack
+            gap={2}
+            hAlign="end"
+            style={{ padding: 'var(--spacing-2)' }}>
+            <Button
+              label="Restore prompt"
+              variant="secondary"
+              size="sm"
+              onClick={() => setComposerValue(lastSubmitted)}
+            />
+          </HStack>
+        )}
         <HistoryDialog />
         <PrivacyDialog />
       </VStack>
