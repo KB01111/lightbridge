@@ -1,7 +1,8 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useLayoutEffect, useState, type CSSProperties } from 'react';
 import { useTheme } from '@astryxdesign/core/theme';
 
 import { useSystemPreference } from './useSystemPreferences';
+import { REDUCED_MOTION_THEME_NAME } from '../theme';
 
 export type EntryPreset = 'fadeIn' | 'slideUp' | 'slideDown' | 'scaleIn';
 
@@ -13,13 +14,6 @@ const HIDDEN: Record<EntryPreset, CSSProperties> = {
 };
 
 const VISIBLE: CSSProperties = { opacity: 1, transform: 'none' };
-
-// `main.tsx` swaps to this theme whenever the app's own
-// `appearance.reducedMotion` setting is on (see theme.ts). Checking the
-// active theme's name lets this hook honor that setting the same way
-// OrbApp's StatusDot pulse checks it directly against the settings query,
-// without this generic hook needing to know about ipc/settings shapes.
-const REDUCED_MOTION_THEME = 'graphite-aurora-reduced-motion';
 
 /**
  * Returns a style object that animates an element in — on mount by default,
@@ -46,10 +40,10 @@ export function useEntryTransition(
   );
   const { name: themeName } = useTheme();
   const reducedMotion =
-    systemReducedMotion || themeName === REDUCED_MOTION_THEME;
+    systemReducedMotion || themeName === REDUCED_MOTION_THEME_NAME;
   const [entered, setEntered] = useState(() => !active || reducedMotion);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!active || reducedMotion) {
       setEntered(true);
       return;

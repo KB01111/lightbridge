@@ -88,8 +88,10 @@ export const graphiteAuroraTheme = defineTheme({
   },
 });
 
+export const REDUCED_MOTION_THEME_NAME = 'graphite-aurora-reduced-motion';
+
 export const graphiteAuroraReducedMotionTheme = defineTheme({
-  name: 'graphite-aurora-reduced-motion',
+  name: REDUCED_MOTION_THEME_NAME,
   extends: graphiteAuroraTheme,
   motion: {
     fast: 1,

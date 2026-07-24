@@ -5,6 +5,7 @@ type ThemeSnapshot = {
   colorScheme: string;
   backgroundBody: string;
   textPrimary: string;
+  accent: string;
 };
 
 async function readThemeSnapshot(): Promise<ThemeSnapshot> {
@@ -15,6 +16,7 @@ async function readThemeSnapshot(): Promise<ThemeSnapshot> {
       colorScheme: styles.colorScheme,
       backgroundBody: styles.getPropertyValue('--color-background-body').trim(),
       textPrimary: styles.getPropertyValue('--color-text-primary').trim(),
+      accent: styles.getPropertyValue('--color-accent').trim(),
     };
   });
 }
@@ -81,8 +83,15 @@ describe('LightBridge theme and overlay opacity', () => {
     const dark = await readThemeSnapshot();
     expect(dark.dataTheme).toBe('dark');
     expect(dark.colorScheme).toBe('dark');
-    expect(dark.backgroundBody.length).toBeGreaterThan(0);
+    expect(dark.backgroundBody).toBe('#090b12');
+    expect(dark.textPrimary).toBe('#f4f5ff');
+    expect(dark.accent).toBe('#908aff');
 
+    await $('button[aria-label="Settings"]').click();
+    await browser.waitUntil(
+      async () => (await browser.getWindowHandles()).length >= 2,
+      { timeout: 10_000, timeoutMsg: 'Settings window was not created.' },
+    );
     await switchToSurface('settings');
     await $('//*[normalize-space(text())="Appearance"]').click();
     const colorMode = await $(
@@ -103,8 +112,9 @@ describe('LightBridge theme and overlay opacity', () => {
     );
     const light = await readThemeSnapshot();
     expect(light.colorScheme).toBe('light');
-    expect(light.backgroundBody).not.toBe(dark.backgroundBody);
-    expect(light.textPrimary).not.toBe(dark.textPrimary);
+    expect(light.backgroundBody).toBe('#f3f4fa');
+    expect(light.textPrimary).toBe('#171926');
+    expect(light.accent).toBe('#635bff');
 
     // Restore dark mode so later specs see the default theme.
     await switchToSurface('settings');
@@ -125,6 +135,12 @@ describe('LightBridge theme and overlay opacity', () => {
   });
 
   it('keeps the panel opacity variable in sync with the transparency slider', async () => {
+    await switchToSurface('main');
+    await $('button[aria-label="Settings"]').click();
+    await browser.waitUntil(
+      async () => (await browser.getWindowHandles()).length >= 2,
+      { timeout: 10_000, timeoutMsg: 'Settings window was not created.' },
+    );
     await switchToSurface('settings');
     await $('//*[normalize-space(text())="Overlay"]').click();
     const slider = await $('[role="slider"][aria-label="Panel transparency"]');
@@ -177,6 +193,12 @@ describe('LightBridge theme and overlay opacity', () => {
   });
 
   it('keeps text-on-panel contrast at or above WCAG AA at the minimum overlay opacity', async () => {
+    await switchToSurface('main');
+    await $('button[aria-label="Settings"]').click();
+    await browser.waitUntil(
+      async () => (await browser.getWindowHandles()).length >= 2,
+      { timeout: 10_000, timeoutMsg: 'Settings window was not created.' },
+    );
     await switchToSurface('settings');
     await $('//*[normalize-space(text())="Overlay"]').click();
     const slider = await $('[role="slider"][aria-label="Panel transparency"]');
@@ -214,6 +236,21 @@ describe('LightBridge theme and overlay opacity', () => {
     await browser.waitUntil(
       async () => (await slider.getAttribute('aria-valuenow')) === '100',
       { timeout: 5_000 },
+    );
+    await switchToSurface('main');
+    await browser.waitUntil(
+      async () => {
+        const value = await browser.execute(() =>
+          getComputedStyle(document.documentElement)
+            .getPropertyValue('--lightbridge-panel-opacity')
+            .trim(),
+        );
+        return value === '100%';
+      },
+      {
+        timeout: 10_000,
+        timeoutMsg: 'Overlay opacity did not restore to 100%.',
+      },
     );
   });
 });
