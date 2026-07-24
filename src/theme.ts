@@ -4,8 +4,14 @@ import { neutralTheme } from '@astryxdesign/theme-neutral';
 export const graphiteAuroraTheme = defineTheme({
   name: 'graphite-aurora',
   extends: neutralTheme,
+  // `color.accent` seeds every accent-derived token that the explicit
+  // `--color-accent` override below does NOT already replace (on-accent,
+  // accent-muted, icon-*, overlay-*, border-emphasized, skeleton, track,
+  // shadow, neutral). It must match the light-mode value of that override
+  // below — otherwise those derived tokens are generated from a seed that
+  // is never actually rendered, producing a subtly mismatched purple.
   color: {
-    accent: '#746CFF',
+    accent: '#635BFF',
     neutralStyle: 'cool',
     contrast: 'standard',
   },

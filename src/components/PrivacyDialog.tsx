@@ -10,6 +10,7 @@ import { Icon } from '@astryxdesign/core/Icon';
 import { ShieldCheckIcon } from '@heroicons/react/24/outline';
 
 import { ipc } from '../lib/ipc';
+import { useEntryTransition } from '../lib/useEntryTransition';
 import { useAppStore } from '../state/appStore';
 
 export function PrivacyDialog() {
@@ -18,6 +19,7 @@ export function PrivacyDialog() {
   const setPrivacyOpen = useAppStore((state) => state.setPrivacyOpen);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const entryStyle = useEntryTransition('fadeIn', '--duration-medium', privacyOpen);
 
   const accept = async () => {
     setBusy(true);
@@ -45,7 +47,7 @@ export function PrivacyDialog() {
         startContent={<Icon icon={ShieldCheckIcon} size="md" />}
       />
       <Section variant="transparent">
-        <VStack gap={4}>
+        <VStack gap={4} style={entryStyle}>
           <Text>
             Screenshots, window details, and OCR are saved locally so you can
             review and reuse them. LightBridge sends only the context items you

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -49,6 +49,23 @@ import {
 import { HistoryDialog } from './components/HistoryDialog';
 import { PrivacyDialog } from './components/PrivacyDialog';
 import { useSurfaceReady } from './lib/useSurfaceReady';
+import { useEntryTransition, type EntryPreset } from './lib/useEntryTransition';
+
+// Banner and chat components don't expose a plain `style` prop (Banner only
+// takes StyleX's `xstyle`, which this project doesn't compile), so entry
+// animations are applied via this transparent wrapper instead. Each use site
+// mounts fresh behind a `condition && <AnimatedEntry>` guard, so the default
+// mount-triggered behavior of useEntryTransition is all that's needed here.
+function AnimatedEntry({
+  preset,
+  children,
+}: {
+  preset: EntryPreset;
+  children: ReactNode;
+}) {
+  const style = useEntryTransition(preset);
+  return <VStack style={style}>{children}</VStack>;
+}
 
 export default function App() {
   const queryClient = useQueryClient();
@@ -460,34 +477,38 @@ export default function App() {
         />
 
         {!gatewayReady && (
-          <Banner
-            status="warning"
-            title="Connect a model provider"
-            description="LightBridge uses Bifrost for every AI request."
-            endContent={
-              <Button
-                label="Open settings"
-                variant="primary"
-                size="sm"
-                onClick={() => void ipc.showSettings()}
-              />
-            }
-          />
+          <AnimatedEntry preset="slideDown">
+            <Banner
+              status="warning"
+              title="Connect a model provider"
+              description="LightBridge uses Bifrost for every AI request."
+              endContent={
+                <Button
+                  label="Open settings"
+                  variant="primary"
+                  size="sm"
+                  onClick={() => void ipc.showSettings()}
+                />
+              }
+            />
+          </AnimatedEntry>
         )}
         {captureStatus.phase === 'failed' && (
-          <Banner
-            status="error"
-            title="Capture failed"
-            description={captureStatus.message}
-            endContent={
-              <Button
-                label="Try again"
-                variant="secondary"
-                size="sm"
-                onClick={() => void ipc.recapture()}
-              />
-            }
-          />
+          <AnimatedEntry preset="slideDown">
+            <Banner
+              status="error"
+              title="Capture failed"
+              description={captureStatus.message}
+              endContent={
+                <Button
+                  label="Try again"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void ipc.recapture()}
+                />
+              }
+            />
+          </AnimatedEntry>
         )}
 
         <StackItem size="fill" style={{ minHeight: 0 }}>
@@ -534,94 +555,97 @@ export default function App() {
                     message.status !== 'streaming',
                 )
                 .map((message) => (
-                  <ChatMessage
-                    key={message.id}
-                    sender={message.role === 'user' ? 'user' : 'assistant'}>
-                    <ChatMessageBubble
-                      variant={message.role === 'user' ? 'filled' : 'ghost'}
-                      metadata={
-                        message.role === 'assistant' ? (
-                          <ChatMessageMetadata
-                            timestamp={
-                              <Timestamp
-                                value={message.createdAt}
-                                format="time"
-                              />
-                            }
-                            footer={
-                              <HStack gap={1} vAlign="center">
-                                <StatusDot
-                                  variant={
-                                    message.status === 'completed'
-                                      ? 'success'
-                                      : message.status === 'cancelled'
-                                        ? 'neutral'
-                                        : 'error'
-                                  }
-                                  label={message.status}
+                  <AnimatedEntry key={message.id} preset="fadeIn">
+                    <ChatMessage
+                      sender={message.role === 'user' ? 'user' : 'assistant'}>
+                      <ChatMessageBubble
+                        variant={message.role === 'user' ? 'filled' : 'ghost'}
+                        metadata={
+                          message.role === 'assistant' ? (
+                            <ChatMessageMetadata
+                              timestamp={
+                                <Timestamp
+                                  value={message.createdAt}
+                                  format="time"
                                 />
-                                <Text type="supporting" color="secondary">
-                                  {message.model ?? 'Unknown model'}
-                                </Text>
-                                <Button
-                                  label="Copy response"
-                                  variant="ghost"
-                                  size="sm"
-                                  isIconOnly
-                                  icon={
-                                    <Icon
-                                      icon={ClipboardDocumentIcon}
-                                      size="sm"
-                                    />
-                                  }
-                                  onClick={() =>
-                                    void navigator.clipboard.writeText(
-                                      message.content,
-                                    )
-                                  }
-                                />
-                              </HStack>
-                            }
-                          />
-                        ) : undefined
-                      }>
-                      {message.role === 'assistant' ? (
-                        message.content.length > 0 ? (
-                          <Markdown density="compact">
-                            {message.content}
-                          </Markdown>
+                              }
+                              footer={
+                                <HStack gap={1} vAlign="center">
+                                  <StatusDot
+                                    variant={
+                                      message.status === 'completed'
+                                        ? 'success'
+                                        : message.status === 'cancelled'
+                                          ? 'neutral'
+                                          : 'error'
+                                    }
+                                    label={message.status}
+                                  />
+                                  <Text type="supporting" color="secondary">
+                                    {message.model ?? 'Unknown model'}
+                                  </Text>
+                                  <Button
+                                    label="Copy response"
+                                    variant="ghost"
+                                    size="sm"
+                                    isIconOnly
+                                    icon={
+                                      <Icon
+                                        icon={ClipboardDocumentIcon}
+                                        size="sm"
+                                      />
+                                    }
+                                    onClick={() =>
+                                      void navigator.clipboard.writeText(
+                                        message.content,
+                                      )
+                                    }
+                                  />
+                                </HStack>
+                              }
+                            />
+                          ) : undefined
+                        }>
+                        {message.role === 'assistant' ? (
+                          message.content.length > 0 ? (
+                            <Markdown density="compact">
+                              {message.content}
+                            </Markdown>
+                          ) : (
+                            <Text type="supporting" color="secondary">
+                              No response text was saved.
+                            </Text>
+                          )
                         ) : (
-                          <Text type="supporting" color="secondary">
-                            No response text was saved.
-                          </Text>
-                        )
+                          message.content
+                        )}
+                      </ChatMessageBubble>
+                    </ChatMessage>
+                  </AnimatedEntry>
+                ))}
+              {streamState === 'streaming' && (
+                <AnimatedEntry preset="fadeIn">
+                  <ChatMessage sender="assistant">
+                    <ChatMessageBubble variant="ghost">
+                      {displayedStreamingText.length > 0 ? (
+                        <Markdown density="compact">
+                          {displayedStreamingText}
+                        </Markdown>
                       ) : (
-                        message.content
+                        <VStack gap={1}>
+                          <Text type="supporting" color="secondary">
+                            Bifrost is choosing the best route…
+                          </Text>
+                          <StatusDot
+                            variant="accent"
+                            label="Generating"
+                            isPulsing
+                          />
+                        </VStack>
                       )}
                     </ChatMessageBubble>
                   </ChatMessage>
-                ))}
-              {streamState === 'streaming' && (
-                <ChatMessage sender="assistant">
-                  <ChatMessageBubble variant="ghost">
-                    {displayedStreamingText.length > 0 ? (
-                      <Markdown density="compact">
-                        {displayedStreamingText}
-                      </Markdown>
-                    ) : (
-                      <VStack gap={1}>
-                        <Text type="supporting" color="secondary">
-                          Bifrost is choosing the best route…
-                        </Text>
-                        <StatusDot
-                          variant="accent"
-                          label="Generating"
-                          isPulsing
-                        />
-                      </VStack>
-                    )}
-                  </ChatMessageBubble>
-                </ChatMessage>
+                </AnimatedEntry>
               )}
             </ChatMessageList>
           </ChatLayout>
