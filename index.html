@@ -12,9 +12,7 @@
         height: 100%;
         width: 100%;
         overflow: hidden;
-        background: var(--color-background, #0f0f10);
-        color: var(--color-foreground, #f5f5f5);
-        font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+        background: transparent;
       }
       @media (prefers-reduced-motion: reduce) {
         *,
@@ -23,6 +21,17 @@
           animation-duration: 0.01ms !important;
           animation-iteration-count: 1 !important;
           transition-duration: 0.01ms !important;
+        }
+      }
+      @media (forced-colors: active) {
+        html[data-surface='main'],
+        html[data-surface='main'] body,
+        html[data-surface='main'] #root,
+        html[data-surface='settings'],
+        html[data-surface='settings'] body,
+        html[data-surface='settings'] #root {
+          background: Canvas;
+          color: CanvasText;
         }
       }
     </style>

@@ -9,12 +9,15 @@ pnpm install
 pnpm tauri dev
 ```
 
-The default global shortcut is `Ctrl+Shift+Space`. It captures the previous
-foreground window, runs local OCR, and opens the overlay.
+The always-on-top status orb opens the overlay with one click. The default
+global shortcut is `Ctrl+Shift+Space`; it captures the previous foreground
+window, runs local OCR, and opens the overlay.
 
-Configure an OpenAI API key in **Settings**. It is stored in Windows Credential
-Manager. Screenshots and OCR remain local until the user sends them, and
-provider requests are made only by the Rust host through the Responses API.
+Connect OpenAI, Anthropic, Gemini, OpenRouter, Groq, Ollama, or another Bifrost
+provider in **Settings**. Credentials are stored in Windows Credential Manager.
+On first setup, LightBridge downloads and checksum-verifies the pinned Bifrost
+Windows gateway, runs it on loopback, and sends every provider request through
+its normalized Responses API. Screenshots and OCR remain local until Send.
 
 ## Scripts
 

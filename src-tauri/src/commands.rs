@@ -5,7 +5,11 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, State, WebviewUrl,
+    WebviewWindowBuilder,
+};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use uuid::Uuid;
 
@@ -14,9 +18,9 @@ use crate::capture::{
     resolve_window,
 };
 use crate::db::Db;
+use crate::gateway::{self, ResolvedContext};
 use crate::models::*;
 use crate::ocr;
-use crate::openai::{self, ResolvedContext};
 use crate::secrets;
 use crate::state::AppState;
 
@@ -33,9 +37,207 @@ pub fn get_product_info() -> serde_json::Value {
     })
 }
 
+fn valid_provider_id(provider_id: &str) -> bool {
+    !provider_id.is_empty()
+        && provider_id.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_')
+        })
+}
+
+fn provider_label(provider_id: &str) -> String {
+    provider_id
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[tauri::command]
+pub fn list_provider_connections(
+    state: State<'_, AppState>,
+) -> Result<Vec<ProviderConnection>, String> {
+    let settings = state.db.settings().map_err(map_err)?;
+    let mut providers = curated_providers();
+    for provider_id in &settings.configured_provider_ids {
+        if providers.iter().any(|provider| &provider.id == provider_id) {
+            continue;
+        }
+        providers.push(ProviderDescriptor {
+            id: provider_id.clone(),
+            label: provider_label(provider_id),
+            description: "Bifrost provider".into(),
+            credential_label: "Provider credential".into(),
+            credential_placeholder: "Paste credential".into(),
+            is_local: false,
+            is_curated: false,
+        });
+    }
+    Ok(providers
+        .into_iter()
+        .map(|provider| {
+            let is_configured = settings.configured_provider_ids.contains(&provider.id)
+                && (provider.is_local || secrets::has_provider_credential(&provider.id));
+            let base_url = if provider.is_local {
+                secrets::get_provider_credential(&provider.id)
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            ProviderConnection {
+                provider,
+                is_configured,
+                base_url,
+                status: if is_configured {
+                    "connected".into()
+                } else {
+                    "notConfigured".into()
+                },
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn set_provider_credential(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider_id: String,
+    credential: String,
+) -> Result<GatewayStatus, String> {
+    let provider_id = provider_id.trim().to_ascii_lowercase();
+    if !valid_provider_id(&provider_id) {
+        return Err("Use a valid Bifrost provider identifier.".into());
+    }
+    let is_local = provider_id == "ollama";
+    let credential = credential.trim();
+    if credential.is_empty() && !is_local {
+        return Err("Enter a provider credential.".into());
+    }
+    if is_local {
+        let url = if credential.is_empty() {
+            "http://127.0.0.1:11434"
+        } else {
+            credential
+        };
+        let parsed = reqwest::Url::parse(url).map_err(|_| "Enter a valid Ollama URL.")?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err("Ollama must use an HTTP or HTTPS URL.".into());
+        }
+        secrets::set_provider_credential(&provider_id, url).map_err(map_err)?;
+    } else {
+        secrets::set_provider_credential(&provider_id, credential).map_err(map_err)?;
+    }
+
+    let mut settings = state.db.settings().map_err(map_err)?;
+    if !settings.configured_provider_ids.contains(&provider_id) {
+        settings.configured_provider_ids.push(provider_id);
+        settings.configured_provider_ids.sort();
+        state
+            .db
+            .set_setting(
+                "configured_provider_ids",
+                &serde_json::to_string(&settings.configured_provider_ids).map_err(map_err)?,
+            )
+            .map_err(map_err)?;
+    }
+    state.gateway.stop();
+    if settings.gateway_mode == "managed" {
+        state.gateway.install(&app).await.map_err(map_err)?;
+    }
+    let settings = state.db.settings().map_err(map_err)?;
+    let status = state.gateway.status(&settings).await;
+    let _ = app.emit("gateway://status", &status);
+    emit_orb_state(&app, state.inner(), Some(&status));
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn remove_provider(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<GatewayStatus, String> {
+    let provider_id = provider_id.trim().to_ascii_lowercase();
+    if !valid_provider_id(&provider_id) {
+        return Err("Invalid provider identifier.".into());
+    }
+    secrets::set_provider_credential(&provider_id, "").map_err(map_err)?;
+    let mut settings = state.db.settings().map_err(map_err)?;
+    settings
+        .configured_provider_ids
+        .retain(|candidate| candidate != &provider_id);
+    state
+        .db
+        .set_setting(
+            "configured_provider_ids",
+            &serde_json::to_string(&settings.configured_provider_ids).map_err(map_err)?,
+        )
+        .map_err(map_err)?;
+    state.gateway.stop();
+    let settings = state.db.settings().map_err(map_err)?;
+    let status = state.gateway.status(&settings).await;
+    let _ = app.emit("gateway://status", &status);
+    emit_orb_state(&app, state.inner(), Some(&status));
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn get_gateway_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<GatewayStatus, String> {
+    let settings = state.db.settings().map_err(map_err)?;
+    let status = state.gateway.status(&settings).await;
+    let _ = app.emit("gateway://status", &status);
+    emit_orb_state(&app, state.inner(), Some(&status));
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn get_orb_state(state: State<'_, AppState>) -> Result<OrbState, String> {
+    if *state.paused.lock()
+        || !state.streams.lock().is_empty()
+        || state.active_capture_operation.lock().is_some()
+    {
+        return Ok(orb_state_for(state.inner(), None));
+    }
+    let settings = state.db.settings().map_err(map_err)?;
+    let status = state.gateway.status(&settings).await;
+    Ok(orb_state_for(state.inner(), Some(&status)))
+}
+
+#[tauri::command]
+pub async fn install_gateway(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<GatewayStatus, String> {
+    state.gateway.install(&app).await.map_err(map_err)?;
+    let settings = state.db.settings().map_err(map_err)?;
+    let status = state.gateway.status(&settings).await;
+    let _ = app.emit("gateway://status", &status);
+    emit_orb_state(&app, state.inner(), Some(&status));
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelDescriptor>, String> {
+    let settings = state.db.settings().map_err(map_err)?;
+    state.gateway.list_models(&settings).await.map_err(map_err)
+}
+
 #[tauri::command]
 pub fn has_api_key() -> bool {
-    secrets::has_openai_api_key()
+    secrets::has_provider_credential("openai")
 }
 
 #[tauri::command]
@@ -44,17 +246,17 @@ pub fn set_api_key(key: String) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("Enter a non-empty OpenAI API key.".into());
     }
-    secrets::set_openai_api_key(trimmed).map_err(map_err)
+    secrets::set_provider_credential("openai", trimmed).map_err(map_err)
 }
 
 #[tauri::command]
 pub fn clear_api_key() -> Result<(), String> {
-    secrets::set_openai_api_key("").map_err(map_err)
+    secrets::set_provider_credential("openai", "").map_err(map_err)
 }
 
 #[tauri::command]
 pub fn estimate_tokens(text: String) -> u32 {
-    openai::estimate_tokens(&text)
+    gateway::estimate_tokens(&text)
 }
 
 #[tauri::command]
@@ -199,10 +401,77 @@ fn emit_capture_status(app: &AppHandle, phase: &str, message: &str) {
     );
 }
 
+fn emit_orb_phase(app: &AppHandle, phase: &str, label: &str, detail: &str) {
+    let _ = app.emit(
+        "orb://state",
+        OrbState {
+            phase: phase.into(),
+            label: label.into(),
+            detail: detail.into(),
+        },
+    );
+}
+
+fn orb_state_for(state: &AppState, gateway_status: Option<&GatewayStatus>) -> OrbState {
+    if *state.paused.lock() {
+        return OrbState {
+            phase: "paused".into(),
+            label: "Paused".into(),
+            detail: "Capture and AI requests are paused.".into(),
+        };
+    }
+    if !state.streams.lock().is_empty() {
+        return OrbState {
+            phase: "generating".into(),
+            label: "Generating".into(),
+            detail: "Bifrost is streaming a response.".into(),
+        };
+    }
+    if state.active_capture_operation.lock().is_some() {
+        return OrbState {
+            phase: "capturing".into(),
+            label: "Capturing".into(),
+            detail: "LightBridge is reading the selected window.".into(),
+        };
+    }
+    match gateway_status.map(|status| status.phase.as_str()) {
+        Some("ready") => OrbState {
+            phase: "ready".into(),
+            label: "Ready".into(),
+            detail: "LightBridge and Bifrost are active.".into(),
+        },
+        Some("offline") | Some("notInstalled") => OrbState {
+            phase: "offline".into(),
+            label: "Gateway offline".into(),
+            detail: gateway_status
+                .map(|status| status.message.clone())
+                .unwrap_or_default(),
+        },
+        _ => OrbState {
+            phase: "setupRequired".into(),
+            label: "Setup required".into(),
+            detail: "Connect a provider in Settings to activate AI.".into(),
+        },
+    }
+}
+
+fn emit_orb_state(app: &AppHandle, state: &AppState, gateway_status: Option<&GatewayStatus>) {
+    let _ = app.emit("orb://state", orb_state_for(state, gateway_status));
+}
+
 async fn perform_capture(app: &AppHandle, state: &AppState) -> Result<CaptureRecord> {
+    if *state.paused.lock() {
+        bail!("LightBridge is paused. Resume it from the orb or tray menu.");
+    }
     let operation_id = Uuid::new_v4().to_string();
     *state.active_capture_operation.lock() = Some(operation_id.clone());
     emit_capture_status(app, "capturing", "Capturing the selected window…");
+    emit_orb_phase(
+        app,
+        "capturing",
+        "Capturing",
+        "Reading the selected window.",
+    );
     let exclude = app
         .get_webview_window("main")
         .and_then(|window| window.hwnd().ok())
@@ -251,7 +520,9 @@ async fn perform_capture(app: &AppHandle, state: &AppState) -> Result<CaptureRec
             let _ = app_for_ocr.emit("context://ocr-updated", full);
         }
         if active_capture_operation.lock().as_deref() == Some(&operation_id) {
+            *active_capture_operation.lock() = None;
             emit_capture_status(&app_for_ocr, "ready", "Capture is ready.");
+            emit_orb_phase(&app_for_ocr, "ready", "Ready", "Capture is ready to use.");
         }
     });
 
@@ -267,7 +538,14 @@ pub async fn capture_foreground(
     match perform_capture(&app, state.inner()).await {
         Ok(capture) => Ok(capture),
         Err(error) => {
+            *state.active_capture_operation.lock() = None;
             emit_capture_status(&app, "failed", &error.to_string());
+            emit_orb_phase(
+                &app,
+                "error",
+                "Capture failed",
+                "Open the overlay for recovery options.",
+            );
             Err(map_err(error))
         }
     }
@@ -293,10 +571,7 @@ pub async fn recapture(
     result
 }
 
-fn resolve_contexts(
-    db: &Db,
-    selections: &[ContextSelection],
-) -> Result<Vec<ResolvedContext>> {
+fn resolve_contexts(db: &Db, selections: &[ContextSelection]) -> Result<Vec<ResolvedContext>> {
     if selections.len() > 12 {
         bail!("Select no more than 12 context items.");
     }
@@ -378,14 +653,21 @@ pub async fn start_chat(
         return Err("The message is too long. Shorten it and retry.".into());
     }
     Uuid::parse_str(&args.stream_id).map_err(|_| "Invalid chat stream identifier.".to_string())?;
-    let profile = resolve_profile(&args.profile)
-        .ok_or_else(|| "Unsupported AI quality profile.".to_string())?;
-    if !state.db.settings().map_err(map_err)?.privacy_acknowledged {
+    let settings = state.db.settings().map_err(map_err)?;
+    let route = settings
+        .route(&args.route_id)
+        .ok_or_else(|| "That model route no longer exists. Choose another route.".to_string())?;
+    if !settings.privacy_acknowledged {
         return Err("Review and accept the privacy disclosure before sending.".into());
     }
-    let api_key = secrets::get_openai_api_key()
-        .map_err(map_err)?
-        .ok_or_else(|| "OpenAI API key not configured. Open Settings to add it.".to_string())?;
+    if *state.paused.lock() {
+        return Err("LightBridge is paused. Resume it from the orb or tray menu.".into());
+    }
+    let gateway_access = state
+        .gateway
+        .ensure_running(&settings)
+        .await
+        .map_err(map_err)?;
     let db_for_blocking = state.db.clone();
     let selections_for_blocking = args.context_selections.clone();
     let contexts = tauri::async_runtime::spawn_blocking(move || {
@@ -412,12 +694,15 @@ pub async fn start_chat(
             &args.conversation_id,
             "assistant",
             "",
-            Some(profile.model),
+            route
+                .model
+                .split_once('/')
+                .map(|(provider, _)| (provider, route.model.as_str())),
             "streaming",
             None,
         )
         .map_err(map_err)?;
-    let input = openai::build_response_input(&history, &contexts, user_message);
+    let input = gateway::build_response_input(&history, &contexts, user_message);
 
     let stream_id = args.stream_id;
     let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
@@ -437,6 +722,12 @@ pub async fn start_chat(
     let stream_id_task = stream_id.clone();
     let app_task = app.clone();
     let partial = Arc::new(Mutex::new(String::new()));
+    emit_orb_phase(
+        &app,
+        "generating",
+        "Generating",
+        "Bifrost is streaming a response.",
+    );
 
     tauri::async_runtime::spawn(async move {
         enum Outcome {
@@ -473,10 +764,12 @@ pub async fn start_chat(
                 .await;
             }
         });
-        let streamed = openai::stream_response(
+        let gateway_client = reqwest::Client::new();
+        let streamed = gateway::stream_response(
             app_task.clone(),
-            &api_key,
-            profile,
+            &gateway_client,
+            gateway_access,
+            route,
             input,
             &stream_id_task,
             move |text| {
@@ -486,7 +779,7 @@ pub async fn start_chat(
         );
         let outcome = tokio::select! {
             result = streamed => match result {
-                Ok(text) => Outcome::Completed(text),
+                Ok((text, _model)) => Outcome::Completed(text),
                 Err(error) => Outcome::Failed(error.to_string()),
             },
             _ = async {
@@ -542,6 +835,7 @@ pub async fn start_chat(
                 error: terminal_error,
             },
         );
+        emit_orb_phase(&app_task, "ready", "Ready", "LightBridge is active.");
     });
 
     Ok(stream_id)
@@ -562,12 +856,186 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
 
 #[tauri::command]
 pub fn set_ai_profile(state: State<'_, AppState>, profile: String) -> Result<AppSettings, String> {
-    resolve_profile(&profile).ok_or_else(|| "Unsupported AI quality profile.".to_string())?;
+    let settings = state.db.settings().map_err(map_err)?;
+    if settings.route(&profile).is_none() {
+        return Err("Unsupported model route.".into());
+    }
     state
         .db
         .set_setting("ai_profile", &profile)
         .map_err(map_err)?;
     state.db.settings().map_err(map_err)
+}
+
+#[tauri::command]
+pub fn set_model_routes(
+    state: State<'_, AppState>,
+    routes: Vec<ModelRoute>,
+) -> Result<AppSettings, String> {
+    if routes.is_empty() || routes.len() > 12 {
+        return Err("Configure between one and twelve model routes.".into());
+    }
+    let mut ids = HashSet::new();
+    for route in &routes {
+        if route.id.trim().is_empty()
+            || route.label.trim().is_empty()
+            || !route.model.contains('/')
+            || !ids.insert(route.id.clone())
+        {
+            return Err(
+                "Every model route needs a unique ID, label, and provider-prefixed model.".into(),
+            );
+        }
+        if !matches!(
+            route.reasoning_effort.as_str(),
+            "none" | "low" | "medium" | "high"
+        ) {
+            return Err("Reasoning effort must be none, low, medium, or high.".into());
+        }
+    }
+    let current = state.db.settings().map_err(map_err)?;
+    state
+        .db
+        .set_setting(
+            "model_routes",
+            &serde_json::to_string(&routes).map_err(map_err)?,
+        )
+        .map_err(map_err)?;
+    if !routes.iter().any(|route| route.id == current.ai_profile) {
+        state
+            .db
+            .set_setting("ai_profile", &routes[0].id)
+            .map_err(map_err)?;
+    }
+    state.db.settings().map_err(map_err)
+}
+
+#[tauri::command]
+pub async fn set_gateway_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: String,
+    external_url: Option<String>,
+    auth_mode: String,
+    auth_secret: Option<String>,
+) -> Result<GatewayStatus, String> {
+    if !matches!(mode.as_str(), "managed" | "external") {
+        return Err("Gateway mode must be managed or external.".into());
+    }
+    if !matches!(auth_mode.as_str(), "none" | "bearer" | "basic") {
+        return Err("Unsupported gateway authentication mode.".into());
+    }
+    if mode == "external" {
+        let url = external_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Enter an external Bifrost URL.".to_string())?;
+        let parsed = reqwest::Url::parse(url).map_err(|_| "Enter a valid gateway URL.")?;
+        let host = parsed.host_str().unwrap_or_default();
+        let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+        if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback) {
+            return Err("Remote gateways must use HTTPS.".into());
+        }
+        if auth_mode != "none" && auth_secret.as_deref().unwrap_or("").trim().is_empty() {
+            return Err("Enter the external gateway credential.".into());
+        }
+    }
+    if let Some(secret) = auth_secret.as_deref() {
+        secrets::set_external_gateway_auth(secret).map_err(map_err)?;
+    } else if auth_mode == "none" {
+        secrets::set_external_gateway_auth("").map_err(map_err)?;
+    }
+    state
+        .db
+        .set_setting("gateway_mode", &mode)
+        .map_err(map_err)?;
+    state
+        .db
+        .set_setting(
+            "external_gateway_url",
+            external_url.as_deref().unwrap_or("").trim(),
+        )
+        .map_err(map_err)?;
+    state
+        .db
+        .set_setting("external_gateway_auth", &auth_mode)
+        .map_err(map_err)?;
+    state.gateway.stop();
+    let settings = state.db.settings().map_err(map_err)?;
+    let status = state.gateway.status(&settings).await;
+    let _ = app.emit("gateway://status", &status);
+    emit_orb_state(&app, state.inner(), Some(&status));
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn set_overlay_preferences(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    preferences: OverlayPreferences,
+) -> Result<AppSettings, String> {
+    if !(72..=100).contains(&preferences.opacity) {
+        return Err("Overlay opacity must be between 72% and 100%.".into());
+    }
+    if !matches!(preferences.orb_edge.as_str(), "left" | "right") {
+        return Err("Orb edge must be left or right.".into());
+    }
+    state
+        .db
+        .set_setting(
+            "overlay",
+            &serde_json::to_string(&preferences).map_err(map_err)?,
+        )
+        .map_err(map_err)?;
+    *state.paused.lock() = preferences.paused;
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_always_on_top(preferences.always_on_top);
+    }
+    if let Some(orb) = app.get_webview_window("orb") {
+        if preferences.orb_enabled {
+            let _ = orb.show();
+        } else {
+            let _ = orb.hide();
+        }
+    }
+    emit_orb_state(&app, state.inner(), None);
+    state.db.settings().map_err(map_err)
+}
+
+#[tauri::command]
+pub fn set_appearance_preferences(
+    state: State<'_, AppState>,
+    preferences: AppearancePreferences,
+) -> Result<AppSettings, String> {
+    if !matches!(preferences.mode.as_str(), "system" | "light" | "dark") {
+        return Err("Appearance mode must be system, light, or dark.".into());
+    }
+    state
+        .db
+        .set_setting(
+            "appearance",
+            &serde_json::to_string(&preferences).map_err(map_err)?,
+        )
+        .map_err(map_err)?;
+    state.db.settings().map_err(map_err)
+}
+
+#[tauri::command]
+pub fn toggle_pause(app: AppHandle, state: State<'_, AppState>) -> Result<OrbState, String> {
+    let mut settings = state.db.settings().map_err(map_err)?;
+    settings.overlay.paused = !settings.overlay.paused;
+    state
+        .db
+        .set_setting(
+            "overlay",
+            &serde_json::to_string(&settings.overlay).map_err(map_err)?,
+        )
+        .map_err(map_err)?;
+    *state.paused.lock() = settings.overlay.paused;
+    let orb_state = orb_state_for(state.inner(), None);
+    let _ = app.emit("orb://state", &orb_state);
+    Ok(orb_state)
 }
 
 #[tauri::command]
@@ -666,12 +1134,57 @@ pub fn remember_target_hwnd(state: State<'_, AppState>) -> Result<u64, String> {
 #[tauri::command]
 pub async fn show_overlay(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let _ = remember_target_hwnd(state);
+    show_overlay_window(&app)?;
+    let _ = app.emit("overlay://capture-request", true);
+    Ok(())
+}
+
+pub fn show_overlay_window(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if !state.ready_surfaces.lock().contains("main") {
+        state.requested_surfaces.lock().insert("main".into());
+        return Ok(());
+    }
+    anchor_overlay(app)?;
     if let Some(window) = app.get_webview_window("main") {
         window.show().map_err(map_err)?;
         window.set_focus().map_err(map_err)?;
     }
-    let _ = app.emit("overlay://capture-request", true);
     Ok(())
+}
+
+fn anchor_overlay(app: &AppHandle) -> Result<(), String> {
+    let Some(orb) = app.get_webview_window("orb") else {
+        return Ok(());
+    };
+    let Some(main) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let orb_position = orb.outer_position().map_err(map_err)?;
+    let orb_size = orb.outer_size().map_err(map_err)?;
+    let main_size = main.outer_size().map_err(map_err)?;
+    let monitor = orb
+        .current_monitor()
+        .map_err(map_err)?
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return Ok(());
+    };
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let gap = (12.0 * orb.scale_factor().unwrap_or(1.0)).round() as i32;
+    let right_half = orb_position.x
+        > monitor_position.x + (monitor_size.width.saturating_sub(orb_size.width) / 2) as i32;
+    let x = if right_half {
+        orb_position.x - main_size.width as i32 - gap
+    } else {
+        orb_position.x + orb_size.width as i32 + gap
+    };
+    let max_y = monitor_position.y + monitor_size.height.saturating_sub(main_size.height) as i32;
+    let y = (orb_position.y - (main_size.height as i32 / 5))
+        .clamp(monitor_position.y, max_y.max(monitor_position.y));
+    main.set_position(Position::Physical(PhysicalPosition::new(x, y)))
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -682,14 +1195,188 @@ pub fn hide_overlay(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn toggle_overlay(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("Overlay window is unavailable.".into());
+    };
+    if window.is_visible().map_err(map_err)? {
+        window.hide().map_err(map_err)?;
+    } else {
+        show_overlay_window(&app)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn show_settings(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.requested_surfaces.lock().insert("settings".into());
+    if let Some(overlay) = app.get_webview_window("main") {
+        overlay.hide().map_err(map_err)?;
+    }
+    if let Some(window) = app.get_webview_window("settings") {
+        if state.ready_surfaces.lock().contains("settings") {
+            window.show().map_err(map_err)?;
+            window.set_focus().map_err(map_err)?;
+        }
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("index.html".into()))
+        .title("LightBridge Settings")
+        .inner_size(900.0, 720.0)
+        .min_inner_size(760.0, 620.0)
+        .resizable(true)
+        .decorations(false)
+        .transparent(true)
+        .visible(false)
+        .center()
+        .build()
+        .map_err(map_err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn ready_to_show(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    surface: String,
+) -> Result<(), String> {
+    if window.label() != surface {
+        return Err("Window readiness label mismatch.".into());
+    }
+    state.ready_surfaces.lock().insert(surface.clone());
+    let requested = state.requested_surfaces.lock().remove(&surface);
+    match surface.as_str() {
+        "orb" => {
+            window
+                .set_size(Size::Logical(LogicalSize::new(48.0, 48.0)))
+                .map_err(map_err)?;
+            let settings = app.state::<AppState>().db.settings().map_err(map_err)?;
+            if let Some(monitor) = app.primary_monitor().map_err(map_err)? {
+                let position = monitor.position();
+                let size = monitor.size();
+                let orb_size = window.outer_size().map_err(map_err)?;
+                let x = if settings.overlay.orb_edge == "left" {
+                    position.x + 12
+                } else {
+                    position.x + size.width.saturating_sub(orb_size.width) as i32 - 12
+                };
+                let max_y = position.y + size.height.saturating_sub(orb_size.height) as i32 - 12;
+                let y = (position.y + settings.overlay.orb_offset)
+                    .clamp(position.y + 12, max_y.max(position.y + 12));
+                window
+                    .set_position(Position::Physical(PhysicalPosition::new(x, y)))
+                    .map_err(map_err)?;
+            }
+            if settings.overlay.orb_enabled {
+                window.show().map_err(map_err)?;
+            }
+        }
+        "settings" if requested => {
+            window.show().map_err(map_err)?;
+            window.set_focus().map_err(map_err)?;
+        }
+        "settings" => {}
+        "main" if std::env::var_os("LIGHTBRIDGE_E2E").is_some() => {
+            window.show().map_err(map_err)?;
+            window.set_focus().map_err(map_err)?;
+        }
+        "main" if requested => {
+            anchor_overlay(&app)?;
+            window.show().map_err(map_err)?;
+            window.set_focus().map_err(map_err)?;
+        }
+        "main" => {}
+        _ => return Err("Unsupported UI surface.".into()),
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn snap_orb(app: AppHandle, state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let orb = app
+        .get_webview_window("orb")
+        .ok_or_else(|| "Orb window is unavailable.".to_string())?;
+    let position = orb.outer_position().map_err(map_err)?;
+    let size = orb.outer_size().map_err(map_err)?;
+    let monitor = orb
+        .current_monitor()
+        .map_err(map_err)?
+        .or_else(|| app.primary_monitor().ok().flatten())
+        .ok_or_else(|| "No display is available.".to_string())?;
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let middle = monitor_position.x + (monitor_size.width.saturating_sub(size.width) / 2) as i32;
+    let edge = if position.x <= middle {
+        "left"
+    } else {
+        "right"
+    };
+    let x = if edge == "left" {
+        monitor_position.x + 12
+    } else {
+        monitor_position.x + monitor_size.width.saturating_sub(size.width) as i32 - 12
+    };
+    let max_y = monitor_position.y + monitor_size.height.saturating_sub(size.height) as i32 - 12;
+    let y = position
+        .y
+        .clamp(monitor_position.y + 12, max_y.max(monitor_position.y + 12));
+    orb.set_position(Position::Physical(PhysicalPosition::new(x, y)))
+        .map_err(map_err)?;
+    let mut settings = state.db.settings().map_err(map_err)?;
+    settings.overlay.orb_edge = edge.into();
+    settings.overlay.orb_offset = y - monitor_position.y;
+    state
+        .db
+        .set_setting(
+            "overlay",
+            &serde_json::to_string(&settings.overlay).map_err(map_err)?,
+        )
+        .map_err(map_err)?;
+    state.db.settings().map_err(map_err)
+}
+
+#[tauri::command]
+pub fn show_orb_menu(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let open =
+        MenuItem::with_id(&app, "show", "Open LightBridge", true, None::<&str>).map_err(map_err)?;
+    let capture = MenuItem::with_id(
+        &app,
+        "capture",
+        "Capture current window",
+        true,
+        None::<&str>,
+    )
+    .map_err(map_err)?;
+    let pause_label = if *state.paused.lock() {
+        "Resume"
+    } else {
+        "Pause"
+    };
+    let pause =
+        MenuItem::with_id(&app, "pause", pause_label, true, None::<&str>).map_err(map_err)?;
+    let settings =
+        MenuItem::with_id(&app, "settings", "Settings", true, None::<&str>).map_err(map_err)?;
+    let quit = MenuItem::with_id(&app, "quit", "Quit", true, None::<&str>).map_err(map_err)?;
+    let menu =
+        Menu::with_items(&app, &[&open, &capture, &pause, &settings, &quit]).map_err(map_err)?;
+    window.popup_menu(&menu).map_err(map_err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn profile_registry_is_exact() {
-        assert_eq!(resolve_profile("best").unwrap().model, "gpt-5.6-sol");
-        assert!(resolve_profile("gpt-5.6-sol").is_none());
-        assert!(resolve_profile("BEST").is_none());
+    fn provider_ids_are_strict() {
+        assert!(valid_provider_id("openrouter"));
+        assert!(valid_provider_id("azure-openai"));
+        assert!(!valid_provider_id("OpenAI"));
+        assert!(!valid_provider_id("../openai"));
     }
 }
